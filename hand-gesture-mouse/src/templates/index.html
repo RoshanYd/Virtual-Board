@@ -36,6 +36,9 @@
                 <img id="server-stream-img" src="{{ url_for('video_feed') }}" class="viewport-media" alt="Server Video Stream" style="display: none;">
                 <video id="client-webcam-video" class="viewport-media" autoplay playsinline muted></video>
                 
+                <!-- Hand Landmark Markings & Skeleton Overlay Canvas -->
+                <canvas id="skeleton-canvas" class="viewport-media"></canvas>
+
                 <!-- 60 FPS Overlay Canvas for Fluid Strokes -->
                 <canvas id="paint-canvas" class="viewport-media"></canvas>
                 
@@ -72,6 +75,7 @@
                         <span style="font-size: 0.75rem; color: var(--text-muted);">Size:</span>
                         <input type="range" id="brush-size" min="2" max="24" value="6" style="width: 70px; accent-color: var(--color-cyan); margin-left: 0.3rem;">
                     </div>
+                    <button id="btn-toggle-mesh" class="tool-btn active" title="Toggle Hand Skeleton Markings">🦴 Markings</button>
                     <button id="btn-undo" class="tool-btn" title="Undo Last Stroke">↩️ Undo</button>
                     <button id="btn-clear" class="tool-btn" style="color: #f87171;" title="Clear Board">🗑️ Clear</button>
                     <button id="btn-save" class="tool-btn" title="Download Canvas as PNG">💾 Save</button>
@@ -177,6 +181,8 @@
         // ============================================================
         const canvas         = document.getElementById('paint-canvas');
         const ctx            = canvas.getContext('2d', { desynchronized: true, willReadFrequently: false });
+        const skeletonCanvas = document.getElementById('skeleton-canvas');
+        const skelCtx        = skeletonCanvas.getContext('2d');
         const video          = document.getElementById('client-webcam-video');
         const serverImg      = document.getElementById('server-stream-img');
         const pointer        = document.getElementById('pointer-cursor');
@@ -190,9 +196,11 @@
         const modeBadge      = document.getElementById('mode-badge');
         const modeBadgeText  = document.getElementById('mode-badge-text');
         const btnCameraToggle= document.getElementById('btn-camera-toggle');
+        const btnToggleMesh  = document.getElementById('btn-toggle-mesh');
 
         let handLandmarker   = null;
         let webcamRunning    = false;
+        let showHandSkeleton = true;
 
         // ============================================================
         // 1. CANVAS RESIZE  (high-DPI aware)
@@ -202,12 +210,108 @@
             vpW = rect.width;
             vpH = rect.height;
             const dpr = window.devicePixelRatio || 1;
+            
             canvas.width  = vpW * dpr;
             canvas.height = vpH * dpr;
             ctx.scale(dpr, dpr);
             redrawAll();
+
+            skeletonCanvas.width  = vpW * dpr;
+            skeletonCanvas.height = vpH * dpr;
+            skelCtx.scale(dpr, dpr);
         }
         window.addEventListener('resize', resizeCanvas);
+
+        // Video to Canvas Coordinate Mapping (selfie mirror & aspect ratio aware)
+        function getCanvasCoords(rawX, rawY) {
+            const nx = 1.0 - rawX; // Mirror X for selfie
+            const ny = rawY;
+
+            if (!video.videoWidth || !video.videoHeight || !vpW || !vpH) {
+                return { x: nx * vpW, y: ny * vpH };
+            }
+
+            const videoRatio = video.videoWidth / video.videoHeight;
+            const containerRatio = vpW / vpH;
+
+            if (videoRatio > containerRatio) {
+                const renderW = vpH * videoRatio;
+                const cropX = (renderW - vpW) / 2;
+                return { x: nx * renderW - cropX, y: ny * vpH };
+            } else {
+                const renderH = vpW / videoRatio;
+                const cropY = (renderH - vpH) / 2;
+                return { x: nx * vpW, y: ny * renderH - cropY };
+            }
+        }
+
+        // ============================================================
+        // HAND SKELETON MARKINGS (Classic MediaPipe Visuals)
+        // ============================================================
+        const HAND_CONNECTIONS = [
+            [0, 1], [1, 2], [2, 3], [3, 4],        // Thumb
+            [0, 5], [5, 6], [6, 7], [7, 8],        // Index
+            [0, 9], [9, 10], [10, 11], [11, 12],   // Middle
+            [0, 13], [13, 14], [14, 15], [15, 16], // Ring
+            [0, 17], [17, 18], [18, 19], [19, 20], // Pinky
+            [5, 9], [9, 13], [13, 17]              // Palm cross-connections
+        ];
+
+        function clearSkeleton() {
+            skelCtx.clearRect(0, 0, vpW || skeletonCanvas.width, vpH || skeletonCanvas.height);
+        }
+
+        function drawSkeleton(lms, gesture) {
+            clearSkeleton();
+            if (!showHandSkeleton || !lms || lms.length < 21) return;
+
+            const pts = new Array(21);
+            for (let i = 0; i < 21; i++) {
+                pts[i] = getCanvasCoords(lms[i].x, lms[i].y);
+            }
+
+            skelCtx.save();
+
+            // 1. Draw connection bones (vibrant emerald green with high visibility)
+            skelCtx.lineWidth = 2.5;
+            skelCtx.strokeStyle = "rgba(0, 255, 136, 0.85)";
+            skelCtx.lineCap = "round";
+            skelCtx.lineJoin = "round";
+
+            for (let k = 0; k < HAND_CONNECTIONS.length; k++) {
+                const [i, j] = HAND_CONNECTIONS[k];
+                skelCtx.beginPath();
+                skelCtx.moveTo(pts[i].x, pts[i].y);
+                skelCtx.lineTo(pts[j].x, pts[j].y);
+                skelCtx.stroke();
+            }
+
+            // 2. Draw landmark dots (joints & fingertips)
+            for (let i = 0; i < 21; i++) {
+                const pt = pts[i];
+                const isTip = (i === 4 || i === 8 || i === 12 || i === 16 || i === 20);
+
+                skelCtx.beginPath();
+                if (i === 8 && gesture === "DRAW") {
+                    skelCtx.arc(pt.x, pt.y, 7, 0, Math.PI * 2);
+                    skelCtx.fillStyle = currentBrushColor;
+                } else if (isTip) {
+                    skelCtx.arc(pt.x, pt.y, 5.5, 0, Math.PI * 2);
+                    skelCtx.fillStyle = "#ef4444"; // Coral red fingertips
+                } else {
+                    skelCtx.arc(pt.x, pt.y, 4, 0, Math.PI * 2);
+                    skelCtx.fillStyle = "#00d2ff"; // Cyan joints
+                }
+                skelCtx.fill();
+
+                // Crisp white border ring
+                skelCtx.lineWidth = 1.5;
+                skelCtx.strokeStyle = "#ffffff";
+                skelCtx.stroke();
+            }
+
+            skelCtx.restore();
+        }
 
         // ============================================================
         // 2. INCREMENTAL DRAWING — draw ONLY the new segment each frame
@@ -348,8 +452,9 @@
             if (gesture === "SELECT_BLUE")  { selectColor("#3b82f6"); finishStroke(); return; }
 
             // --- Map normalised finger pos → canvas px (mirror X for selfie) ---
-            const cx = (1.0 - nx) * vpW;
-            const cy = ny * vpH;
+            const coords = getCanvasCoords(nx, ny);
+            const cx = coords.x;
+            const cy = coords.y;
 
             // EMA smooth (high alpha = responsive, low = silky smooth)
             if (smoothX < 0) { smoothX = cx; smoothY = cy; }
@@ -477,15 +582,19 @@
                     if (res.landmarks && res.landmarks.length > 0) {
                         const lms     = res.landmarks[0];
                         const gesture = classifyGesture(lms);
+                        drawSkeleton(lms, gesture);
                         // lms[8] = index fingertip
                         handleGesture(gesture, lms[8].x, lms[8].y);
                     } else {
+                        clearSkeleton();
                         finishStroke();
                         gestureHud.textContent = "No hand";
                         gestureHud.style.color = "#64748b";
                         statGesture.textContent = "—";
                     }
                 } catch (_) { /* skip bad frame */ }
+            } else {
+                clearSkeleton();
             }
 
             requestAnimationFrame(rafLoop);
@@ -518,6 +627,7 @@
         }
 
         function stopCamera() {
+            clearSkeleton();
             video.srcObject?.getTracks().forEach(t => t.stop());
             video.srcObject        = null;
             webcamRunning          = false;
@@ -567,6 +677,14 @@
             strokeHistory = []; activeStroke = null; isDrawing = false;
             ctx.clearRect(0, 0, canvas.width, canvas.height);
         });
+
+        if (btnToggleMesh) {
+            btnToggleMesh.addEventListener('click', () => {
+                showHandSkeleton = !showHandSkeleton;
+                btnToggleMesh.classList.toggle('active', showHandSkeleton);
+                if (!showHandSkeleton) clearSkeleton();
+            });
+        }
 
         document.getElementById('btn-save').addEventListener('click', () => {
             const a = document.createElement('a');
