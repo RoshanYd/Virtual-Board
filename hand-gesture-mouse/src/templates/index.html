@@ -8,7 +8,6 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.js" crossorigin="anonymous"></script>
 </head>
 <body>
@@ -177,6 +176,7 @@
         const statLatency = document.getElementById('stat-latency');
         const statGesture = document.getElementById('stat-gesture');
         const gestureHud = document.getElementById('gesture-hud-val');
+        const statEngine = document.getElementById('stat-engine');
         const modeBadge = document.getElementById('mode-badge');
         const modeBadgeText = document.getElementById('mode-badge-text');
         const btnCameraToggle = document.getElementById('btn-camera-toggle');
@@ -368,22 +368,47 @@
 
         // --- 5. MediaPipe Vision WebAssembly Initialization ---
         async function setupMediaPipe() {
+            if (statEngine) statEngine.textContent = "Loading...";
             try {
-                const vision = await visionBundle.FilesetResolver.forVisionTasks(
+                // The vision_bundle.js CDN script exports under window.MediaPipeTasksVision
+                const { HandLandmarker, FilesetResolver } = window.MediaPipeTasksVision;
+
+                const vision = await FilesetResolver.forVisionTasks(
                     "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
                 );
-                
-                handLandmarker = await visionBundle.HandLandmarker.createFromOptions(vision, {
-                    baseOptions: {
-                        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task",
-                        delegate: "GPU"
-                    },
-                    runningMode: "VIDEO",
-                    numHands: 1
-                });
-                console.log("[INFO] MediaPipe Tasks Vision initialized on GPU at 60 FPS.");
+
+                // Try GPU delegate first, fall back to CPU on failure
+                try {
+                    handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                        baseOptions: {
+                            modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task",
+                            delegate: "GPU"
+                        },
+                        runningMode: "VIDEO",
+                        numHands: 1
+                    });
+                    if (statEngine) statEngine.textContent = "Client GPU";
+                    console.log("[INFO] MediaPipe HandLandmarker ready — GPU delegate.");
+                } catch (gpuErr) {
+                    console.warn("[WARN] GPU delegate failed, retrying on CPU:", gpuErr);
+                    handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                        baseOptions: {
+                            modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task",
+                            delegate: "CPU"
+                        },
+                        runningMode: "VIDEO",
+                        numHands: 1
+                    });
+                    if (statEngine) statEngine.textContent = "Client CPU";
+                    console.log("[INFO] MediaPipe HandLandmarker ready — CPU delegate.");
+                }
             } catch (err) {
-                console.warn("[WARNING] MediaPipe WebAssembly direct init deferred, using fallback.", err);
+                console.error("[ERROR] MediaPipe initialization failed:", err);
+                if (statEngine) statEngine.textContent = "MP Failed";
+                if (gestureHud) {
+                    gestureHud.textContent = "MP INIT FAILED";
+                    gestureHud.style.color = "#ef4444";
+                }
             }
         }
         setupMediaPipe();
