@@ -147,241 +147,277 @@
         </aside>
     </main>
 
-    <!-- Embedded Logic: 60 FPS Engine & Spline Smoothing -->
+    <!-- 60 FPS Air-Drawing Engine — Zero Lag Architecture -->
     <script>
-        // --- State Variables ---
+        // ============================================================
+        // STATE
+        // ============================================================
         let currentBrushColor = "#10b981";
-        let brushSize = 6;
-        let isEraserActive = false;
-        let isPaused = false;
-        let currentGesture = "NONE";
-        let strokeHistory = []; // for multi-stroke Undo
-        let currentStroke = [];
-        let isDrawing = false;
-        let lastSmoothPoint = null;
-        let lastTimestamp = performance.now();
-        let frameCount = 0;
-        let rollingFPS = 60.0;
+        let brushSize        = 6;
+        let isEraserActive   = false;
+        let isPaused         = false;
+        let strokeHistory    = [];          // completed strokes
+        let activeStroke     = null;        // stroke being drawn RIGHT NOW
+        let isDrawing        = false;
+        let lastTimestamp    = performance.now();
+        let frameCount       = 0;
+        let rollingFPS       = 60.0;
+        let vpW = 0, vpH = 0;              // cached viewport size (avoid reflow in RAF)
 
-        // Canvas & Media References
-        const canvas = document.getElementById('paint-canvas');
-        const ctx = canvas.getContext('2d', { desynchronized: true });
-        const video = document.getElementById('client-webcam-video');
-        const serverImg = document.getElementById('server-stream-img');
-        const pointer = document.getElementById('pointer-cursor');
-        const viewport = document.getElementById('viewport');
-        const fpsCounter = document.getElementById('fps-counter');
-        const statFps = document.getElementById('stat-fps');
-        const statLatency = document.getElementById('stat-latency');
-        const statGesture = document.getElementById('stat-gesture');
-        const gestureHud = document.getElementById('gesture-hud-val');
-        const statEngine = document.getElementById('stat-engine');
-        const modeBadge = document.getElementById('mode-badge');
-        const modeBadgeText = document.getElementById('mode-badge-text');
-        const btnCameraToggle = document.getElementById('btn-camera-toggle');
+        // --- Gesture debounce counters ---
+        let clearCounter = 0;
+        let undoFired    = false;          // fire undo once per pinch gesture
 
-        let isClientMode = true;
-        let handLandmarker = null;
-        let webcamRunning = false;
+        // --- Pointer smoothing (Kalman-lite: low α = more smooth, less lag at 60 fps) ---
+        let smoothX = -1, smoothY = -1;
+        const SMOOTH = 0.65;               // 0 = max smooth/lag, 1 = raw/instant
 
-        // --- 1. High-DPI Canvas Resizing ---
+        // ============================================================
+        // DOM REFS
+        // ============================================================
+        const canvas         = document.getElementById('paint-canvas');
+        const ctx            = canvas.getContext('2d', { desynchronized: true, willReadFrequently: false });
+        const video          = document.getElementById('client-webcam-video');
+        const serverImg      = document.getElementById('server-stream-img');
+        const pointer        = document.getElementById('pointer-cursor');
+        const viewport       = document.getElementById('viewport');
+        const fpsCounter     = document.getElementById('fps-counter');
+        const statFps        = document.getElementById('stat-fps');
+        const statLatency    = document.getElementById('stat-latency');
+        const statGesture    = document.getElementById('stat-gesture');
+        const gestureHud     = document.getElementById('gesture-hud-val');
+        const statEngine     = document.getElementById('stat-engine');
+        const modeBadge      = document.getElementById('mode-badge');
+        const modeBadgeText  = document.getElementById('mode-badge-text');
+        const btnCameraToggle= document.getElementById('btn-camera-toggle');
+
+        let handLandmarker   = null;
+        let webcamRunning    = false;
+
+        // ============================================================
+        // 1. CANVAS RESIZE  (high-DPI aware)
+        // ============================================================
         function resizeCanvas() {
             const rect = viewport.getBoundingClientRect();
+            vpW = rect.width;
+            vpH = rect.height;
             const dpr = window.devicePixelRatio || 1;
-            canvas.width = rect.width * dpr;
-            canvas.height = rect.height * dpr;
+            canvas.width  = vpW * dpr;
+            canvas.height = vpH * dpr;
             ctx.scale(dpr, dpr);
-            redrawAllStrokes();
+            redrawAll();
         }
         window.addEventListener('resize', resizeCanvas);
 
-        // --- 2. Multi-Stroke Redraw Function ---
-        function redrawAllStrokes() {
-            const rect = viewport.getBoundingClientRect();
-            ctx.clearRect(0, 0, rect.width, rect.height);
-            for (const stroke of strokeHistory) {
-                drawStroke(stroke);
-            }
-            if (currentStroke.length > 0) {
-                drawStroke(currentStroke);
-            }
-        }
-
-        // --- 3. 60 FPS Catmull-Rom / Bézier Curve Drawing ---
-        function drawStroke(stroke) {
-            if (stroke.points.length < 2) return;
+        // ============================================================
+        // 2. INCREMENTAL DRAWING — draw ONLY the new segment each frame
+        //    Full redraw only on stroke-end / undo / clear
+        // ============================================================
+        function drawSegment(x0, y0, x1, y1, color, size, eraser) {
             ctx.save();
-            ctx.strokeStyle = stroke.isEraser ? '#000000' : stroke.color;
-            ctx.globalCompositeOperation = stroke.isEraser ? 'destination-out' : 'source-over';
-            ctx.lineWidth = stroke.size;
-            ctx.lineCap = 'round';
-            ctx.lineJoin = 'round';
-
+            ctx.strokeStyle = eraser ? 'rgba(0,0,0,1)' : color;
+            ctx.globalCompositeOperation = eraser ? 'destination-out' : 'source-over';
+            ctx.lineWidth   = size;
+            ctx.lineCap     = 'round';
+            ctx.lineJoin    = 'round';
             ctx.beginPath();
-            ctx.moveTo(stroke.points[0].x, stroke.points[0].y);
-
-            for (let i = 1; i < stroke.points.length - 1; i++) {
-                const xc = (stroke.points[i].x + stroke.points[i + 1].x) / 2;
-                const yc = (stroke.points[i].y + stroke.points[i + 1].y) / 2;
-                ctx.quadraticCurveTo(stroke.points[i].x, stroke.points[i].y, xc, yc);
-            }
-
-            const last = stroke.points[stroke.points.length - 1];
-            ctx.lineTo(last.x, last.y);
+            ctx.moveTo(x0, y0);
+            ctx.lineTo(x1, y1);
             ctx.stroke();
             ctx.restore();
         }
 
-        // --- 4. Pure Landmark Gesture Classifier (60 FPS Client-Side) ---
-        function classifyGestures(landmarks) {
-            if (!landmarks || landmarks.length < 21) return "NONE";
+        function redrawAll() {
+            ctx.clearRect(0, 0, vpW || canvas.width, vpH || canvas.height);
+            for (const s of strokeHistory) renderStroke(s);
+            if (activeStroke) renderStroke(activeStroke);
+        }
 
-            // Normalised distance helper
-            const dist = (i1, i2) => {
-                const dx = landmarks[i1].x - landmarks[i2].x;
-                const dy = landmarks[i1].y - landmarks[i2].y;
-                return Math.hypot(dx, dy);
-            };
+        function renderStroke(s) {
+            if (!s || s.points.length < 2) return;
+            ctx.save();
+            ctx.strokeStyle = s.eraser ? 'rgba(0,0,0,1)' : s.color;
+            ctx.globalCompositeOperation = s.eraser ? 'destination-out' : 'source-over';
+            ctx.lineWidth = s.size;
+            ctx.lineCap  = 'round';
+            ctx.lineJoin = 'round';
+            ctx.beginPath();
+            ctx.moveTo(s.points[0].x, s.points[0].y);
+            for (let i = 1; i < s.points.length - 1; i++) {
+                const mx = (s.points[i].x + s.points[i+1].x) / 2;
+                const my = (s.points[i].y + s.points[i+1].y) / 2;
+                ctx.quadraticCurveTo(s.points[i].x, s.points[i].y, mx, my);
+            }
+            const p = s.points[s.points.length - 1];
+            ctx.lineTo(p.x, p.y);
+            ctx.stroke();
+            ctx.restore();
+        }
 
-            const handScale = Math.max(dist(0, 9), 0.001);
-            const pinchDist = (t1, t2) => dist(t1, t2) / handScale;
+        // ============================================================
+        // 3. GESTURE CLASSIFIER  (pure landmark math, no ML overhead)
+        // ============================================================
+        function classifyGesture(lms) {
+            if (!lms || lms.length < 21) return "NONE";
 
-            // Finger extended check (tip is higher than pip joint)
-            const isExtended = (tip, pip) => landmarks[tip].y < landmarks[pip].y - 0.02;
+            const d = (a, b) => Math.hypot(lms[a].x - lms[b].x, lms[a].y - lms[b].y);
+            const scale = Math.max(d(0, 9), 0.001);
 
-            const thumbExt = Math.abs(landmarks[4].x - landmarks[0].x) > Math.abs(landmarks[2].x - landmarks[0].x);
-            const indexExt = isExtended(8, 6);
-            const middleExt = isExtended(12, 10);
-            const ringExt = isExtended(16, 14);
-            const pinkyExt = isExtended(20, 18);
+            // Extended = tip clearly above PIP joint (negative Y = up in normalised coords)
+            const ext = (tip, pip) => lms[tip].y < lms[pip].y - 0.025;
 
-            const nonThumbCount = (indexExt ? 1 : 0) + (middleExt ? 1 : 0) + (ringExt ? 1 : 0) + (pinkyExt ? 1 : 0);
-            const allCurled = !indexExt && !middleExt && !ringExt && !pinkyExt;
-            const allExt = thumbExt && indexExt && middleExt && ringExt && pinkyExt;
+            const idxExt  = ext(8,  6);
+            const midExt  = ext(12, 10);
+            const rngExt  = ext(16, 14);
+            const pkyExt  = ext(20, 18);
+            const thmExt  = Math.abs(lms[4].x - lms[0].x) > Math.abs(lms[2].x - lms[0].x);
 
-            // 1. CLEAR: Closed fist
-            if (allCurled) return "CLEAR";
+            const nFing   = (idxExt?1:0) + (midExt?1:0) + (rngExt?1:0) + (pkyExt?1:0);
+            const fist    = !idxExt && !midExt && !rngExt && !pkyExt;
+            const palm    = thmExt && idxExt && midExt && rngExt && pkyExt;
+            const pinch   = d(4, 8) / scale < 0.28;
 
-            // 2. HOVER: Open palm
-            if (allExt) return "HOVER";
+            // Priority order matters:
+            if (fist)  return "CLEAR";           // ✊ Closed fist → Clear
+            if (palm)  return "HOVER";           // ✋ Open palm → Hover
+            if (pinch) return "UNDO";            // 👌 Thumb+index pinch → Undo
 
-            // 3. UNDO: Thumb-index pinch
-            if (pinchDist(4, 8) < 0.30) return "UNDO";
-
-            // 4. COLOR SELECT: 2, 3, or 4 fingers
-            if (indexExt && !thumbExt) {
-                if (nonThumbCount === 2) return "SELECT_RED";
-                if (nonThumbCount === 3) return "SELECT_GREEN";
-                if (nonThumbCount === 4) return "SELECT_BLUE";
+            // Colour selects (index up, thumb tucked)
+            if (idxExt && !thmExt) {
+                if (nFing === 2) return "SELECT_RED";   // ✌️
+                if (nFing === 3) return "SELECT_GREEN"; // 🤟
+                if (nFing === 4) return "SELECT_BLUE";  // 🖖
             }
 
-            // 5. DRAW: Index finger only
-            if (indexExt && nonThumbCount === 1) return "DRAW";
+            // Draw: index only extended
+            if (idxExt && nFing === 1) return "DRAW";  // ☝️
 
             return "HOVER";
         }
 
-        // Debounce filters
-        let clearCounter = 0;
-        let undoCounter = 0;
-
-        function handleGesture(gesture, rawX, rawY) {
-            currentGesture = gesture;
-            statGesture.textContent = gesture;
+        // ============================================================
+        // 4. GESTURE HANDLER  (all side-effects live here)
+        // ============================================================
+        function handleGesture(gesture, nx, ny) {
+            // --- Update HUD ---
+            const color = gesture === "DRAW" ? "#38bdf8"
+                        : gesture === "CLEAR" ? "#ef4444"
+                        : gesture === "UNDO"  ? "#f59e0b"
+                        : gesture.startsWith("SELECT") ? "#a78bfa"
+                        : "#94a3b8";
             gestureHud.textContent = gesture;
+            gestureHud.style.color = color;
+            statGesture.textContent = gesture;
 
-            if (isPaused) return;
+            if (isPaused) { finishStroke(); return; }
 
-            // Debounced Clear
+            // --- Clear (hold fist ~1 s) ---
             if (gesture === "CLEAR") {
                 clearCounter++;
-                if (clearCounter > 40) { // ~0.7s at 60 FPS
+                // Show progress on the HUD
+                const pct = Math.min(clearCounter / 70, 1);
+                gestureHud.textContent = `CLEAR ${Math.round(pct*100)}%`;
+                if (clearCounter >= 70) {
                     strokeHistory = [];
-                    currentStroke = [];
-                    redrawAllStrokes();
-                    clearCounter = 0;
+                    activeStroke  = null;
+                    isDrawing     = false;
+                    redrawAll();
+                    clearCounter  = 0;
                 }
-            } else {
-                clearCounter = 0;
+                return;
             }
+            clearCounter = 0;
 
-            // Debounced Undo
+            // --- Undo (fire once per pinch, re-arm on release) ---
             if (gesture === "UNDO") {
-                undoCounter++;
-                if (undoCounter === 12) { // trigger once per pinch
+                if (!undoFired) {
+                    undoFired = true;
                     if (strokeHistory.length > 0) {
                         strokeHistory.pop();
-                        redrawAllStrokes();
+                        redrawAll();
                     }
                 }
-            } else {
-                undoCounter = 0;
+                finishStroke();
+                return;
+            }
+            undoFired = false;
+
+            // --- Colour select ---
+            if (gesture === "SELECT_RED")   { selectColor("#ef4444"); finishStroke(); return; }
+            if (gesture === "SELECT_GREEN") { selectColor("#10b981"); finishStroke(); return; }
+            if (gesture === "SELECT_BLUE")  { selectColor("#3b82f6"); finishStroke(); return; }
+
+            // --- Map normalised finger pos → canvas px (mirror X for selfie) ---
+            const cx = (1.0 - nx) * vpW;
+            const cy = ny * vpH;
+
+            // EMA smooth (high alpha = responsive, low = silky smooth)
+            if (smoothX < 0) { smoothX = cx; smoothY = cy; }
+            else {
+                smoothX = smoothX * (1 - SMOOTH) + cx * SMOOTH;
+                smoothY = smoothY * (1 - SMOOTH) + cy * SMOOTH;
             }
 
-            // Color Selection
-            if (gesture === "SELECT_RED") selectColor("#ef4444");
-            if (gesture === "SELECT_GREEN") selectColor("#10b981");
-            if (gesture === "SELECT_BLUE") selectColor("#3b82f6");
-
-            // Air Drawing Logic
-            const rect = viewport.getBoundingClientRect();
-            const canvasX = rawX * rect.width;
-            const canvasY = rawY * rect.height;
-
-            // Position smoothing via EMA (Alpha = 0.55 for 60 FPS responsiveness)
-            if (!lastSmoothPoint) {
-                lastSmoothPoint = { x: canvasX, y: canvasY };
-            } else {
-                lastSmoothPoint.x = lastSmoothPoint.x * 0.45 + canvasX * 0.55;
-                lastSmoothPoint.y = lastSmoothPoint.y * 0.45 + canvasY * 0.55;
-            }
-
-            // Update Pointer Cursor
+            // Update glowing pointer
             pointer.style.display = 'block';
-            pointer.style.left = `${lastSmoothPoint.x}px`;
-            pointer.style.top = `${lastSmoothPoint.y}px`;
-            pointer.style.color = currentBrushColor;
+            pointer.style.left    = `${smoothX}px`;
+            pointer.style.top     = `${smoothY}px`;
             pointer.style.borderColor = currentBrushColor;
 
+            // --- HOVER: no ink ---
+            if (gesture === "HOVER" || gesture === "NONE") {
+                finishStroke();
+                return;
+            }
+
+            // --- DRAW ---
             if (gesture === "DRAW") {
                 if (!isDrawing) {
-                    isDrawing = true;
-                    currentStroke = {
-                        color: currentBrushColor,
-                        size: brushSize,
-                        isEraser: isEraserActive,
-                        points: [{ x: lastSmoothPoint.x, y: lastSmoothPoint.y }]
+                    // Start a new stroke
+                    isDrawing    = true;
+                    activeStroke = {
+                        color:  currentBrushColor,
+                        size:   brushSize,
+                        eraser: isEraserActive,
+                        points: [{ x: smoothX, y: smoothY }]
                     };
                 } else {
-                    currentStroke.points.push({ x: lastSmoothPoint.x, y: lastSmoothPoint.y });
-                    redrawAllStrokes();
+                    // Append point & draw only the new segment (zero redraw cost)
+                    const pts = activeStroke.points;
+                    const prev = pts[pts.length - 1];
+                    pts.push({ x: smoothX, y: smoothY });
+                    drawSegment(prev.x, prev.y, smoothX, smoothY,
+                                activeStroke.color, activeStroke.size, activeStroke.eraser);
                 }
-            } else {
-                if (isDrawing && currentStroke.points && currentStroke.points.length > 1) {
-                    strokeHistory.push(currentStroke);
-                    currentStroke = [];
-                }
-                isDrawing = false;
             }
         }
 
-        // --- 5. MediaPipe Vision WebAssembly Initialization (dynamic ESM — no race condition) ---
+        function finishStroke() {
+            if (isDrawing && activeStroke && activeStroke.points.length > 1) {
+                strokeHistory.push(activeStroke);
+                // Redraw once to get smooth Bézier version into the bitmap
+                redrawAll();
+            }
+            activeStroke = null;
+            isDrawing    = false;
+            pointer.style.display = 'none';
+        }
+
+        // ============================================================
+        // 5. MEDIAPIPE INIT  (dynamic ESM — zero race-condition risk)
+        // ============================================================
         async function setupMediaPipe() {
             if (statEngine) statEngine.textContent = "Loading...";
-            if (gestureHud) { gestureHud.textContent = "LOADING MP..."; gestureHud.style.color = "#f59e0b"; }
+            if (gestureHud) { gestureHud.textContent = "Loading MP…"; gestureHud.style.color = "#f59e0b"; }
 
             try {
-                // Dynamic ESM import — module is guaranteed loaded before we use it
-                const mpVision = await import(
-                    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm"
-                );
-                const { HandLandmarker, FilesetResolver } = mpVision;
+                const mp = await import("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm");
+                const { HandLandmarker, FilesetResolver } = mp;
 
                 const vision = await FilesetResolver.forVisionTasks(
                     "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
                 );
 
-                // GPU first — CPU fallback for compatibility
                 for (const delegate of ["GPU", "CPU"]) {
                     try {
                         handLandmarker = await HandLandmarker.createFromOptions(vision, {
@@ -392,138 +428,127 @@
                             runningMode: "VIDEO",
                             numHands: 1,
                             minHandDetectionConfidence: 0.5,
-                            minHandPresenceConfidence: 0.5,
-                            minTrackingConfidence: 0.5
+                            minHandPresenceConfidence:  0.5,
+                            minTrackingConfidence:      0.5
                         });
                         if (statEngine) statEngine.textContent = `Client ${delegate}`;
-                        if (gestureHud) { gestureHud.textContent = "READY"; gestureHud.style.color = "#10b981"; }
-                        console.log(`[INFO] MediaPipe HandLandmarker ready on ${delegate}.`);
-                        break; // success — stop trying
-                    } catch (delegateErr) {
-                        console.warn(`[WARN] ${delegate} delegate failed:`, delegateErr);
+                        if (gestureHud) { gestureHud.textContent = "Show hand ✋"; gestureHud.style.color = "#10b981"; }
+                        console.log(`[MP] Ready — ${delegate}`);
+                        break;
+                    } catch (e) {
+                        console.warn(`[MP] ${delegate} failed:`, e);
                         handLandmarker = null;
                     }
                 }
-
-                if (!handLandmarker) throw new Error("Both GPU and CPU delegates failed.");
+                if (!handLandmarker) throw new Error("All delegates failed");
 
             } catch (err) {
-                console.error("[ERROR] MediaPipe init failed:", err);
+                console.error("[MP] Init failed:", err);
                 if (statEngine) statEngine.textContent = "MP Failed";
-                if (gestureHud) { gestureHud.textContent = "MP INIT FAILED"; gestureHud.style.color = "#ef4444"; }
+                if (gestureHud) { gestureHud.textContent = "⚠ MP FAILED"; gestureHud.style.color = "#ef4444"; }
             }
         }
         setupMediaPipe();
 
-        // --- 6. Strictly 60 FPS Render Loop ---
-        function render60FPS(timestamp) {
-            const delta = timestamp - lastTimestamp;
-            lastTimestamp = timestamp;
+        // ============================================================
+        // 6. 60 FPS RENDER LOOP
+        //    detectForVideo is called every frame — MediaPipe internally
+        //    skips redundant computation when nothing changed.
+        // ============================================================
+        function rafLoop(ts) {
+            const delta = ts - lastTimestamp;
+            lastTimestamp = ts;
 
+            // FPS counter — update every 10 frames to avoid jitter
             frameCount++;
             if (frameCount % 10 === 0) {
-                const instantFPS = 1000 / Math.max(delta, 1);
-                // Clamp to smooth strict 60.0 target
-                rollingFPS = rollingFPS * 0.85 + instantFPS * 0.15;
-                const displayFPS = (rollingFPS >= 58 && rollingFPS <= 62) ? 60.0 : rollingFPS;
-                fpsCounter.textContent = displayFPS.toFixed(1);
-                statFps.textContent = displayFPS.toFixed(1);
-                statLatency.textContent = `${Math.min(delta, 16.7).toFixed(1)} ms`;
+                const inst = 1000 / Math.max(delta, 1);
+                rollingFPS = rollingFPS * 0.85 + inst * 0.15;
+                const disp = (rollingFPS >= 58 && rollingFPS <= 62) ? 60.0 : rollingFPS;
+                fpsCounter.textContent = disp.toFixed(1);
+                statFps.textContent    = disp.toFixed(1);
+                statLatency.textContent= `${Math.min(delta, 16.7).toFixed(1)} ms`;
             }
 
+            // Hand detection
             if (webcamRunning && handLandmarker && video.readyState >= 2) {
                 try {
-                    const results = handLandmarker.detectForVideo(video, timestamp);
-                    if (results.landmarks && results.landmarks.length > 0) {
-                        const lms = results.landmarks[0];
-                        const gesture = classifyGestures(lms);
-                        // Landmark 8 is the index fingertip (flip x because of selfie mirror)
-                        const rawX = 1.0 - lms[8].x;
-                        const rawY = lms[8].y;
-                        handleGesture(gesture, rawX, rawY);
+                    const res = handLandmarker.detectForVideo(video, ts);
+                    if (res.landmarks && res.landmarks.length > 0) {
+                        const lms     = res.landmarks[0];
+                        const gesture = classifyGesture(lms);
+                        // lms[8] = index fingertip
+                        handleGesture(gesture, lms[8].x, lms[8].y);
                     } else {
-                        handleGesture("NONE", 0, 0);
-                        pointer.style.display = 'none';
+                        finishStroke();
+                        gestureHud.textContent = "No hand";
+                        gestureHud.style.color = "#64748b";
+                        statGesture.textContent = "—";
                     }
-                } catch (e) {
-                    // Frame skip safeguard
-                }
+                } catch (_) { /* skip bad frame */ }
             }
 
-            requestAnimationFrame(render60FPS);
+            requestAnimationFrame(rafLoop);
         }
-        requestAnimationFrame(render60FPS);
+        requestAnimationFrame(rafLoop);
 
-        // --- 7. Client Camera Activation ---
+        // ============================================================
+        // 7. CAMERA
+        // ============================================================
         async function startCamera() {
             try {
-                btnCameraToggle.textContent = "⏳ Accessing Camera...";
+                btnCameraToggle.textContent = "⏳ Accessing camera…";
                 const stream = await navigator.mediaDevices.getUserMedia({
-                    video: {
-                        width: { ideal: 1280, max: 1920 },
-                        height: { ideal: 720, max: 1080 },
-                        frameRate: { ideal: 60, min: 30 },
-                        facingMode: "user"
-                    },
+                    video: { width:{ideal:1280}, height:{ideal:720}, frameRate:{ideal:60,min:30}, facingMode:"user" },
                     audio: false
                 });
                 video.srcObject = stream;
                 await video.play();
-                webcamRunning = true;
-                video.style.display = 'block';
-                serverImg.style.display = 'none';
-                btnCameraToggle.textContent = "💻 Switch to Server Stream";
-                btnCameraToggle.style.background = "rgba(16, 185, 129, 0.2)";
-                btnCameraToggle.style.color = "#10b981";
+                webcamRunning  = true;
+                video.style.display    = 'block';
+                serverImg.style.display= 'none';
+                btnCameraToggle.textContent          = "💻 Switch to Server Stream";
+                btnCameraToggle.style.background     = "rgba(16,185,129,0.2)";
+                btnCameraToggle.style.color          = "#10b981";
                 resizeCanvas();
             } catch (err) {
-                alert("Camera error: " + err.message + "\nPlease enable camera permissions in your browser.");
+                alert("Camera error: " + err.message);
                 btnCameraToggle.textContent = "📷 Start Browser Camera";
             }
         }
 
         function stopCamera() {
-            if (video.srcObject) {
-                video.srcObject.getTracks().forEach(t => t.stop());
-                video.srcObject = null;
-            }
-            webcamRunning = false;
-            video.style.display = 'none';
-            serverImg.style.display = 'block';
-            btnCameraToggle.textContent = "📷 Start Browser Camera";
-            btnCameraToggle.style.background = "rgba(6, 182, 212, 0.15)";
-            btnCameraToggle.style.color = "#38bdf8";
+            video.srcObject?.getTracks().forEach(t => t.stop());
+            video.srcObject        = null;
+            webcamRunning          = false;
+            video.style.display    = 'none';
+            serverImg.style.display= 'block';
+            btnCameraToggle.textContent          = "📷 Start Browser Camera";
+            btnCameraToggle.style.background     = "rgba(6,182,212,0.15)";
+            btnCameraToggle.style.color          = "#38bdf8";
         }
 
-        btnCameraToggle.addEventListener('click', () => {
-            if (webcamRunning) {
-                stopCamera();
-            } else {
-                startCamera();
-            }
-        });
+        btnCameraToggle.addEventListener('click', () =>
+            webcamRunning ? stopCamera() : startCamera());
 
-        // Auto-start camera if hosted in cloud
-        fetch('/health').then(r => r.json()).then(data => {
-            if (!data.video_thread_alive) {
-                // Cloud mode: auto-prompt camera
-                startCamera();
-            }
+        // Auto-start in cloud (no server camera)
+        fetch('/health').then(r => r.json()).then(d => {
+            if (!d.video_thread_alive) startCamera();
         }).catch(() => {});
 
-        // --- 8. Toolbar UI Handlers ---
+        // ============================================================
+        // 8. TOOLBAR HANDLERS
+        // ============================================================
         function selectColor(hex) {
             currentBrushColor = hex;
-            isEraserActive = false;
-            document.querySelectorAll('.color-btn').forEach(btn => {
-                btn.classList.toggle('active', btn.dataset.color === hex);
-            });
+            isEraserActive    = false;
+            document.querySelectorAll('.color-btn').forEach(b =>
+                b.classList.toggle('active', b.dataset.color === hex));
             document.getElementById('btn-eraser').classList.remove('active');
         }
 
-        document.querySelectorAll('.color-btn').forEach(btn => {
-            btn.addEventListener('click', () => selectColor(btn.dataset.color));
-        });
+        document.querySelectorAll('.color-btn').forEach(b =>
+            b.addEventListener('click', () => selectColor(b.dataset.color)));
 
         document.getElementById('btn-eraser').addEventListener('click', function() {
             isEraserActive = !isEraserActive;
@@ -535,49 +560,42 @@
         });
 
         document.getElementById('btn-undo').addEventListener('click', () => {
-            if (strokeHistory.length > 0) {
-                strokeHistory.pop();
-                redrawAllStrokes();
-            }
+            if (strokeHistory.length > 0) { strokeHistory.pop(); redrawAll(); }
         });
 
         document.getElementById('btn-clear').addEventListener('click', () => {
-            strokeHistory = [];
-            currentStroke = [];
-            redrawAllStrokes();
+            strokeHistory = []; activeStroke = null; isDrawing = false;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
         });
 
         document.getElementById('btn-save').addEventListener('click', () => {
-            const link = document.createElement('a');
-            link.download = `air-drawing-${Date.now()}.png`;
-            link.href = canvas.toDataURL('image/png');
-            link.click();
+            const a = document.createElement('a');
+            a.download = `air-drawing-${Date.now()}.png`;
+            a.href     = canvas.toDataURL('image/png');
+            a.click();
         });
 
-        document.getElementById('btn-fullscreen').addEventListener('click', () => {
-            if (!document.fullscreenElement) {
-                viewport.requestFullscreen().catch(err => alert(err.message));
-            } else {
-                document.exitFullscreen();
-            }
-        });
+        document.getElementById('btn-fullscreen').addEventListener('click', () =>
+            document.fullscreenElement
+                ? document.exitFullscreen()
+                : viewport.requestFullscreen().catch(e => alert(e.message)));
 
         document.getElementById('btn-pause').addEventListener('click', () => {
             isPaused = true;
-            modeBadge.className = 'status-pill paused';
+            modeBadge.className   = 'status-pill paused';
             modeBadgeText.textContent = 'PAUSED';
             fetch('/stop', { method: 'POST' });
         });
 
         document.getElementById('btn-resume').addEventListener('click', () => {
             isPaused = false;
-            modeBadge.className = 'status-pill drawing';
+            modeBadge.className   = 'status-pill drawing';
             modeBadgeText.textContent = 'DRAWING';
             fetch('/resume', { method: 'POST' });
         });
 
-        // Initialize layout on load
-        setTimeout(resizeCanvas, 100);
+        // Init canvas size on load
+        setTimeout(resizeCanvas, 150);
     </script>
 </body>
 </html>
