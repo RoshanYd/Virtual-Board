@@ -8,7 +8,6 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.js" crossorigin="anonymous"></script>
 </head>
 <body>
     <!-- Top Navigation Bar -->
@@ -366,49 +365,52 @@
             }
         }
 
-        // --- 5. MediaPipe Vision WebAssembly Initialization ---
+        // --- 5. MediaPipe Vision WebAssembly Initialization (dynamic ESM — no race condition) ---
         async function setupMediaPipe() {
             if (statEngine) statEngine.textContent = "Loading...";
+            if (gestureHud) { gestureHud.textContent = "LOADING MP..."; gestureHud.style.color = "#f59e0b"; }
+
             try {
-                // The vision_bundle.js CDN script exports under window.MediaPipeTasksVision
-                const { HandLandmarker, FilesetResolver } = window.MediaPipeTasksVision;
+                // Dynamic ESM import — module is guaranteed loaded before we use it
+                const mpVision = await import(
+                    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm"
+                );
+                const { HandLandmarker, FilesetResolver } = mpVision;
 
                 const vision = await FilesetResolver.forVisionTasks(
                     "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
                 );
 
-                // Try GPU delegate first, fall back to CPU on failure
-                try {
-                    handLandmarker = await HandLandmarker.createFromOptions(vision, {
-                        baseOptions: {
-                            modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task",
-                            delegate: "GPU"
-                        },
-                        runningMode: "VIDEO",
-                        numHands: 1
-                    });
-                    if (statEngine) statEngine.textContent = "Client GPU";
-                    console.log("[INFO] MediaPipe HandLandmarker ready — GPU delegate.");
-                } catch (gpuErr) {
-                    console.warn("[WARN] GPU delegate failed, retrying on CPU:", gpuErr);
-                    handLandmarker = await HandLandmarker.createFromOptions(vision, {
-                        baseOptions: {
-                            modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task",
-                            delegate: "CPU"
-                        },
-                        runningMode: "VIDEO",
-                        numHands: 1
-                    });
-                    if (statEngine) statEngine.textContent = "Client CPU";
-                    console.log("[INFO] MediaPipe HandLandmarker ready — CPU delegate.");
+                // GPU first — CPU fallback for compatibility
+                for (const delegate of ["GPU", "CPU"]) {
+                    try {
+                        handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                            baseOptions: {
+                                modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task",
+                                delegate
+                            },
+                            runningMode: "VIDEO",
+                            numHands: 1,
+                            minHandDetectionConfidence: 0.5,
+                            minHandPresenceConfidence: 0.5,
+                            minTrackingConfidence: 0.5
+                        });
+                        if (statEngine) statEngine.textContent = `Client ${delegate}`;
+                        if (gestureHud) { gestureHud.textContent = "READY"; gestureHud.style.color = "#10b981"; }
+                        console.log(`[INFO] MediaPipe HandLandmarker ready on ${delegate}.`);
+                        break; // success — stop trying
+                    } catch (delegateErr) {
+                        console.warn(`[WARN] ${delegate} delegate failed:`, delegateErr);
+                        handLandmarker = null;
+                    }
                 }
+
+                if (!handLandmarker) throw new Error("Both GPU and CPU delegates failed.");
+
             } catch (err) {
-                console.error("[ERROR] MediaPipe initialization failed:", err);
+                console.error("[ERROR] MediaPipe init failed:", err);
                 if (statEngine) statEngine.textContent = "MP Failed";
-                if (gestureHud) {
-                    gestureHud.textContent = "MP INIT FAILED";
-                    gestureHud.style.color = "#ef4444";
-                }
+                if (gestureHud) { gestureHud.textContent = "MP INIT FAILED"; gestureHud.style.color = "#ef4444"; }
             }
         }
         setupMediaPipe();
