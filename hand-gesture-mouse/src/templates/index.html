@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Air-Drawing Whiteboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <style>
+        .color-swatch {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            display: inline-block;
+            border: 2px solid #fff;
+            box-shadow: 0 0 4px rgba(0,0,0,0.3);
+            vertical-align: middle;
+            transition: background-color 0.3s;
+        }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <h1>Air-Drawing Whiteboard</h1>
+        <div id="mode-badge" class="status-badge tracking">DRAWING</div>
+    </header>
+
+    <main class="main-container">
+        <!-- Left: Video Feed -->
+        <section class="video-section">
+            <img src="{{ url_for('video_feed') }}" class="video-feed" alt="Webcam Feed">
+            
+            <div class="overlay-stats">
+                <div class="stat-box">
+                    <div class="stat-label">Current Gesture</div>
+                    <div id="gesture-label" class="stat-value">NONE</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-label">Pen Color</div>
+                    <div class="stat-value">
+                        <span id="color-swatch" class="color-swatch" style="background-color: #00FF00;"></span>
+                    </div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-label">System FPS</div>
+                    <div id="fps-label" class="stat-value">0.0</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Right: Controls -->
+        <section class="controls-section">
+            <div class="panel">
+                <h2>🎨 Whiteboard Actions</h2>
+                <p style="font-size: 0.875rem; color: var(--text-muted); margin-bottom: 1rem;">
+                    You can use gestures or the buttons below.
+                </p>
+                <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem;">
+                    <button id="btn-clear" class="btn btn-primary">Clear Canvas</button>
+                </div>
+            </div>
+
+            <div class="panel">
+                <h2>🛡️ Safety Controls</h2>
+                <p style="font-size: 0.875rem; color: var(--text-muted); margin-bottom: 1rem;">
+                    Pause the system if gestures are accidentally triggering.
+                </p>
+                <div style="display: flex; gap: 0.5rem;">
+                    <button id="btn-stop" class="btn btn-danger">Pause System</button>
+                    <button id="btn-resume" class="btn btn-primary" style="background-color: #22c55e;">Resume</button>
+                </div>
+            </div>
+
+            <div class="panel">
+                <h2>📖 Gesture Guide</h2>
+                <ul style="font-size: 0.875rem; color: var(--text-muted); line-height: 1.6; padding-left: 1.2rem;">
+                    <li><strong>Index Finger Only:</strong> Draw</li>
+                    <li><strong>2 Fingers:</strong> Select Red</li>
+                    <li><strong>3 Fingers:</strong> Select Green</li>
+                    <li><strong>4 Fingers:</strong> Select Blue</li>
+                    <li><strong>Thumb-Index Pinch:</strong> Undo</li>
+                    <li><strong>Closed Fist (hold 1.5s):</strong> Clear Canvas</li>
+                    <li><strong>Open Palm (5 fingers):</strong> Hover (no drawing)</li>
+                </ul>
+            </div>
+        </section>
+    </main>
+
+    <script>
+        // Setup Server-Sent Events (SSE)
+        const evtSource = new EventSource("/events");
+        
+        const badge = document.getElementById('mode-badge');
+        const gestureLabel = document.getElementById('gesture-label');
+        const fpsLabel = document.getElementById('fps-label');
+        const colorSwatch = document.getElementById('color-swatch');
+
+        evtSource.onmessage = function(event) {
+            // Ignore keepalive messages
+            if (event.data.trim() === "keepalive") return;
+            
+            try {
+                const data = JSON.parse(event.data);
+                
+                // Update FPS
+                fpsLabel.textContent = data.fps.toFixed(1);
+                
+                // Update Gesture
+                gestureLabel.textContent = data.gesture;
+                
+                // Update Mode Badge
+                badge.textContent = data.mode;
+                badge.className = 'status-badge ' + data.mode.toLowerCase();
+                
+                // Update Color if available
+                if (data.color) {
+                    colorSwatch.style.backgroundColor = data.color;
+                }
+            } catch (e) {
+                // Ignore parse errors from keepalives
+            }
+        };
+
+        // UI Buttons
+        document.getElementById('btn-clear').addEventListener('click', () => {
+            fetch('/clear', { method: 'POST' });
+        });
+
+        document.getElementById('btn-stop').addEventListener('click', () => {
+            fetch('/stop', { method: 'POST' });
+        });
+
+        document.getElementById('btn-resume').addEventListener('click', () => {
+            fetch('/resume', { method: 'POST' });
+        });
+        
+        // Listen for 'q' globally
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'q' || e.key === 'Q') {
+                fetch('/stop', { method: 'POST' });
+            }
+        });
+    </script>
+</body>
+</html>
