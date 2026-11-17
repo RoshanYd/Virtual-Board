@@ -24,13 +24,18 @@
 <body>
     <header class="header">
         <h1>Air-Drawing Whiteboard</h1>
-        <div id="mode-badge" class="status-badge tracking">DRAWING</div>
+        <div style="display: flex; align-items: center; gap: 0.75rem;">
+            <button id="btn-camera-toggle" class="btn" style="background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.3); color: #fff; padding: 0.4rem 0.8rem; font-size: 0.85rem; cursor: pointer; border-radius: 8px;">📷 Switch to Browser Webcam</button>
+            <div id="mode-badge" class="status-badge tracking">DRAWING</div>
+        </div>
     </header>
 
     <main class="main-container">
         <!-- Left: Video Feed -->
         <section class="video-section">
-            <img src="{{ url_for('video_feed') }}" class="video-feed" alt="Webcam Feed">
+            <img id="video-feed-img" src="{{ url_for('video_feed') }}" class="video-feed" alt="Webcam Feed">
+            <video id="client-webcam-video" autoplay playsinline muted style="display: none;"></video>
+            <canvas id="client-capture-canvas" style="display: none;"></canvas>
             
             <div class="overlay-stats">
                 <div class="stat-box">
@@ -89,39 +94,150 @@
     </main>
 
     <script>
-        // Setup Server-Sent Events (SSE)
-        const evtSource = new EventSource("/events");
+        // Setup Server-Sent Events (SSE) for Server-Camera Mode
+        let evtSource = new EventSource("/events");
         
         const badge = document.getElementById('mode-badge');
         const gestureLabel = document.getElementById('gesture-label');
         const fpsLabel = document.getElementById('fps-label');
         const colorSwatch = document.getElementById('color-swatch');
+        const videoFeedImg = document.getElementById('video-feed-img');
+        const btnCameraToggle = document.getElementById('btn-camera-toggle');
+        const clientVideo = document.getElementById('client-webcam-video');
+        const captureCanvas = document.getElementById('client-capture-canvas');
+        const captureCtx = captureCanvas.getContext('2d');
 
-        evtSource.onmessage = function(event) {
-            // Ignore keepalive messages
-            if (event.data.trim() === "keepalive") return;
-            
-            try {
-                const data = JSON.parse(event.data);
-                
-                // Update FPS
-                fpsLabel.textContent = data.fps.toFixed(1);
-                
-                // Update Gesture
-                gestureLabel.textContent = data.gesture;
-                
-                // Update Mode Badge
+        let isClientCameraActive = false;
+        let clientCameraStream = null;
+        let clientProcessLoopId = null;
+        let isProcessingFrame = false;
+
+        function updateUIState(data) {
+            if (data.fps !== undefined) fpsLabel.textContent = data.fps.toFixed(1);
+            if (data.gesture) gestureLabel.textContent = data.gesture;
+            if (data.mode) {
                 badge.textContent = data.mode;
                 badge.className = 'status-badge ' + data.mode.toLowerCase();
-                
-                // Update Color if available
-                if (data.color) {
-                    colorSwatch.style.backgroundColor = data.color;
-                }
-            } catch (e) {
-                // Ignore parse errors from keepalives
             }
+            if (data.color) colorSwatch.style.backgroundColor = data.color;
+        }
+
+        evtSource.onmessage = function(event) {
+            if (isClientCameraActive) return; // Ignore SSE when in browser camera mode
+            if (event.data.trim() === "keepalive") return;
+            try {
+                const data = JSON.parse(event.data);
+                updateUIState(data);
+            } catch (e) {}
         };
+
+        // --- Client Browser Webcam Mode (for Docker / Cloud Deployments) ---
+        async function startClientCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" },
+                    audio: false
+                });
+                clientCameraStream = stream;
+                clientVideo.srcObject = stream;
+                await clientVideo.play();
+
+                captureCanvas.width = clientVideo.videoWidth || 640;
+                captureCanvas.height = clientVideo.videoHeight || 480;
+
+                isClientCameraActive = true;
+                btnCameraToggle.textContent = "💻 Switch to Server Camera";
+                btnCameraToggle.style.background = "#22c55e";
+
+                // Stop SSE updates while in client camera mode
+                if (evtSource) {
+                    evtSource.close();
+                }
+
+                startClientFrameLoop();
+            } catch (err) {
+                alert("Could not access browser camera: " + err.message + "\nPlease grant camera permissions in your browser.");
+            }
+        }
+
+        function stopClientCamera() {
+            isClientCameraActive = false;
+            if (clientProcessLoopId) {
+                cancelAnimationFrame(clientProcessLoopId);
+                clientProcessLoopId = null;
+            }
+            if (clientCameraStream) {
+                clientCameraStream.getTracks().forEach(track => track.stop());
+                clientCameraStream = null;
+            }
+            btnCameraToggle.textContent = "📷 Switch to Browser Webcam";
+            btnCameraToggle.style.background = "rgba(255,255,255,0.15)";
+            videoFeedImg.src = "/video_feed?" + new Date().getTime();
+
+            // Re-open SSE
+            evtSource = new EventSource("/events");
+            evtSource.onmessage = function(event) {
+                if (isClientCameraActive) return;
+                if (event.data.trim() === "keepalive") return;
+                try {
+                    const data = JSON.parse(event.data);
+                    updateUIState(data);
+                } catch (e) {}
+            };
+        }
+
+        async function startClientFrameLoop() {
+            if (!isClientCameraActive) return;
+
+            if (!isProcessingFrame && clientVideo.readyState === clientVideo.HAVE_ENOUGH_DATA) {
+                isProcessingFrame = true;
+                try {
+                    captureCanvas.width = clientVideo.videoWidth;
+                    captureCanvas.height = clientVideo.videoHeight;
+                    captureCtx.drawImage(clientVideo, 0, 0, captureCanvas.width, captureCanvas.height);
+                    
+                    const dataUrl = captureCanvas.toDataURL('image/jpeg', 0.7);
+
+                    const res = await fetch('/process_frame', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ image: dataUrl, flip: true })
+                    });
+
+                    if (res.ok) {
+                        const data = await res.json();
+                        if (data.image) {
+                            videoFeedImg.src = data.image;
+                        }
+                        updateUIState(data);
+                    }
+                } catch (e) {
+                    // Frame drop on transient network lag
+                } finally {
+                    isProcessingFrame = false;
+                }
+            }
+
+            if (isClientCameraActive) {
+                clientProcessLoopId = requestAnimationFrame(startClientFrameLoop);
+            }
+        }
+
+        btnCameraToggle.addEventListener('click', () => {
+            if (isClientCameraActive) {
+                stopClientCamera();
+            } else {
+                startClientCamera();
+            }
+        });
+
+        // Auto-detect if host has no physical camera (e.g. Docker, Render, Kubernetes)
+        fetch('/health').then(r => r.json()).then(data => {
+            if (!data.video_thread_alive) {
+                btnCameraToggle.style.background = "#f59e0b";
+                btnCameraToggle.textContent = "📷 Click to Start Browser Webcam";
+            }
+        }).catch(() => {});
 
         // UI Buttons
         document.getElementById('btn-clear').addEventListener('click', () => {

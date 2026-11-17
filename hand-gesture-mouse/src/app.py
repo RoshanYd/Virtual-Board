@@ -6,7 +6,9 @@ to a browser dashboard and emits Server-Sent Events (SSE) for
 real-time UI updates.
 """
 
+import base64
 import json
+import os
 import queue
 import sys
 import threading
@@ -20,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import cv2
 import numpy as np
-from flask import Flask, render_template, Response, jsonify
+from flask import Flask, render_template, Response, jsonify, request
 
 from src.hand_tracker import HandTracker
 from src.gesture_classifier import classify_whiteboard_gesture
@@ -32,9 +34,18 @@ from src.models import GestureLabel, GestureResult
 # ---------------------------------------------------------------------------
 app = Flask(__name__)
 
-# Core components (lazy-init in video thread to avoid import-time camera grab)
+# Core components (lazy-init in video thread or via get_tracker to avoid import-time camera grab)
 tracker = None
+tracker_lock = threading.Lock()
 controller = WhiteboardController()
+
+def get_tracker() -> HandTracker:
+    """Thread-safe accessor for HandTracker instance."""
+    global tracker
+    with tracker_lock:
+        if tracker is None:
+            tracker = HandTracker(max_hands=1, fps_window=30)
+    return tracker
 
 # Cross-thread communication
 sse_queue: queue.Queue = queue.Queue(maxsize=5)
@@ -66,22 +77,28 @@ def video_loop() -> None:
 
     # --- Open camera with retries ---
     cap = None
-    for attempt in range(5):
+    for attempt in range(3):
         cap = cv2.VideoCapture(0)
         if cap.isOpened():
             print(f"[INFO] Camera opened on attempt {attempt + 1}.")
             break
-        print(f"[WARNING] Camera open attempt {attempt + 1}/5 failed, retrying...")
-        time.sleep(1)
+        print(f"[WARNING] Camera open attempt {attempt + 1}/3 failed, retrying...")
+        time.sleep(0.5)
 
     if cap is None or not cap.isOpened():
-        print("[ERROR] Cannot open webcam after 5 attempts.")
+        print("[INFO] No hardware camera available on host (running in Container/Cloud mode).")
+        print("[INFO] Client-side browser webcam streaming is available via /process_frame.")
         video_thread_alive = False
+        try:
+            get_tracker()
+            print("[INFO] MediaPipe HandTracker pre-warmed and ready for client streams.")
+        except Exception as e:
+            print(f"[WARNING] Tracker pre-warm failed: {e}")
         return
 
     # --- Initialise tracker ---
     try:
-        tracker = HandTracker(max_hands=1, fps_window=30)
+        tracker = get_tracker()
     except Exception as e:
         print(f"[ERROR] Failed to initialise HandTracker: {e}")
         traceback.print_exc()
@@ -257,13 +274,100 @@ def trigger_clear():
     controller.canvas.clear()
     return jsonify({"status": "cleared"})
 
+@app.route('/process_frame', methods=['POST'])
+def process_frame():
+    """Process a single frame sent from the client's browser webcam.
+    
+    Accepts JSON payload:
+        {
+            "image": "data:image/jpeg;base64,...",
+            "flip": true  (optional, defaults to true)
+        }
+    Returns JSON:
+        {
+            "image": "data:image/jpeg;base64,...",
+            "fps": float,
+            "gesture": str,
+            "mode": str,
+            "color": str (optional)
+        }
+    """
+    global system_paused
+    try:
+        data = request.get_json(silent=True) or {}
+        img_data = data.get('image', '')
+        if not img_data:
+            return jsonify({"error": "No image data provided"}), 400
+
+        if ',' in img_data:
+            img_data = img_data.split(',', 1)[1]
+
+        img_bytes = base64.b64decode(img_data)
+        np_arr = np.frombuffer(img_bytes, np.uint8)
+        frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+        if frame is None:
+            return jsonify({"error": "Failed to decode image"}), 400
+
+        # Flip horizontally for selfie mirror view if requested
+        if data.get('flip', True):
+            frame = cv2.flip(frame, 1)
+
+        # 1. Track Hands
+        trk = get_tracker()
+        hand_result = trk.process_frame(frame)
+        fps = trk.get_fps()
+
+        # 2. Classify Gesture
+        if hand_result.detected:
+            gesture_result = classify_whiteboard_gesture(hand_result.landmarks)
+        else:
+            gesture_result = GestureResult(label=GestureLabel.NONE, confidence=0.0)
+
+        # 3. Canvas action
+        ui_state = {}
+        if system_paused:
+            mode = "PAUSED"
+        else:
+            mode = "DRAWING"
+            ui_state = controller.process_gesture(gesture_result, hand_result.landmarks, frame.shape[:2])
+
+        # 4. Composite drawing over frame
+        annotated = hand_result.annotated_frame
+        annotated = controller.overlay(annotated)
+
+        # 5. Encode output frame
+        ok, buf = cv2.imencode('.jpg', annotated, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if not ok:
+            return jsonify({"error": "Failed to encode frame"}), 500
+
+        out_b64 = "data:image/jpeg;base64," + base64.b64encode(buf).decode('utf-8')
+
+        disp_gesture = gesture_result.label.name
+        if system_paused:
+            disp_gesture = "SYSTEM PAUSED"
+
+        response = {
+            "image": out_b64,
+            "fps": round(fps, 1),
+            "gesture": disp_gesture,
+            "mode": mode,
+        }
+        response.update(ui_state)
+        return jsonify(response)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/health')
 def health():
-    """Quick health-check endpoint for debugging."""
+    """Health check endpoint for Docker, Kubernetes, and uptime probes."""
     return jsonify({
+        "status": "healthy",
         "video_thread_alive": video_thread_alive,
         "kill_switch": kill_switch_active,
         "paused": system_paused,
+        "model_loaded": tracker is not None,
     })
 
 
@@ -271,10 +375,12 @@ def health():
 # Entry Point
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    print("[INFO] Starting video thread...")
+    port = int(os.environ.get("PORT", 5000))
+    host = os.environ.get("HOST", "0.0.0.0")
+
+    print("[INFO] Starting background video worker...")
     t = threading.Thread(target=video_loop, daemon=True)
     t.start()
 
-    print("[INFO] Starting Flask server on http://127.0.0.1:5000")
-    # Turn off reloader to prevent double-starting the camera
-    app.run(host='127.0.0.1', port=5000, debug=False, use_reloader=False)
+    print(f"[INFO] Starting Flask server on http://{host}:{port}")
+    app.run(host=host, port=port, debug=False, use_reloader=False)
