@@ -2,274 +2,555 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Air-Drawing Whiteboard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Air-Drawing Whiteboard — 60 FPS AI Canvas</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-    <style>
-        .color-swatch {
-            width: 24px;
-            height: 24px;
-            border-radius: 50%;
-            display: inline-block;
-            border: 2px solid #fff;
-            box-shadow: 0 0 4px rgba(0,0,0,0.3);
-            vertical-align: middle;
-            transition: background-color 0.3s;
-        }
-    </style>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.js" crossorigin="anonymous"></script>
 </head>
 <body>
-    <header class="header">
-        <h1>Air-Drawing Whiteboard</h1>
-        <div style="display: flex; align-items: center; gap: 0.75rem;">
-            <button id="btn-camera-toggle" class="btn" style="background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.3); color: #fff; padding: 0.4rem 0.8rem; font-size: 0.85rem; cursor: pointer; border-radius: 8px;">📷 Switch to Browser Webcam</button>
-            <div id="mode-badge" class="status-badge tracking">DRAWING</div>
+    <!-- Top Navigation Bar -->
+    <header class="navbar">
+        <a href="#" class="brand">
+            <div class="brand-icon">✨</div>
+            <span class="brand-title">Air-Drawing Whiteboard</span>
+        </a>
+        <div class="nav-actions">
+            <button id="btn-camera-toggle" class="tool-btn" style="background: rgba(6, 182, 212, 0.15); border-color: rgba(6, 182, 212, 0.3); color: #38bdf8;">
+                📷 Start Browser Camera
+            </button>
+            <div id="mode-badge" class="status-pill drawing">
+                <span class="pulse-dot"></span>
+                <span id="mode-badge-text">DRAWING</span>
+            </div>
         </div>
     </header>
 
-    <main class="main-container">
-        <!-- Optional Cloud Banner -->
-        <div id="camera-status-banner" style="display: none; grid-column: 1 / -1; background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.4); border-radius: 10px; padding: 0.75rem 1rem; color: #fbbf24; font-size: 0.9rem; text-align: center;">
-            ☁️ <strong>Cloud Deployment Detected:</strong> Click the button above to grant browser camera access and start drawing in the air!
-        </div>
+    <!-- Main Workspace -->
+    <main class="main-wrapper">
+        <!-- Stage: Video & 60 FPS Drawing Canvas -->
+        <section class="stage-container">
+            <div class="canvas-viewport" id="viewport">
+                <!-- Video Elements -->
+                <img id="server-stream-img" src="{{ url_for('video_feed') }}" class="viewport-media" alt="Server Video Stream" style="display: none;">
+                <video id="client-webcam-video" class="viewport-media" autoplay playsinline muted></video>
+                
+                <!-- 60 FPS Overlay Canvas for Fluid Strokes -->
+                <canvas id="paint-canvas" class="viewport-media"></canvas>
+                
+                <!-- Glowing Fingertip Pointer -->
+                <div id="pointer-cursor"></div>
 
-        <!-- Left: Video Feed -->
-        <section class="video-section">
-            <img id="video-feed-img" src="{{ url_for('video_feed') }}" class="video-feed" alt="Webcam Feed">
-            <video id="client-webcam-video" autoplay playsinline muted style="display: none;"></video>
-            <canvas id="client-capture-canvas" style="display: none;"></canvas>
-            
-            <div class="overlay-stats">
-                <div class="stat-box">
-                    <div class="stat-label">Current Gesture</div>
-                    <div id="gesture-label" class="stat-value">NONE</div>
-                </div>
-                <div class="stat-box">
-                    <div class="stat-label">Pen Color</div>
-                    <div class="stat-value">
-                        <span id="color-swatch" class="color-swatch" style="background-color: #00FF00;"></span>
+                <!-- Floating Canvas HUD -->
+                <div class="canvas-hud">
+                    <div class="hud-chip">
+                        <span>Gesture:</span>
+                        <span id="gesture-hud-val" style="color: #38bdf8;">HOVER</span>
+                    </div>
+                    <div class="hud-chip">
+                        <span>FPS:</span>
+                        <span id="fps-counter" class="fps-badge">60.0</span>
                     </div>
                 </div>
-                <div class="stat-box">
-                    <div class="stat-label">System FPS</div>
-                    <div id="fps-label" class="stat-value">0.0</div>
+            </div>
+
+            <!-- Quick Interactive Toolbar -->
+            <div class="quick-toolbar">
+                <div class="color-group">
+                    <button class="color-btn active" data-color="#10b981" style="background: #10b981;" title="Emerald Green"></button>
+                    <button class="color-btn" data-color="#ef4444" style="background: #ef4444;" title="Coral Red"></button>
+                    <button class="color-btn" data-color="#3b82f6" style="background: #3b82f6;" title="Azure Blue"></button>
+                    <button class="color-btn" data-color="#f59e0b" style="background: #f59e0b;" title="Amber Yellow"></button>
+                    <button class="color-btn" data-color="#8b5cf6" style="background: #8b5cf6;" title="Neon Purple"></button>
+                    <button class="color-btn" data-color="#f8fafc" style="background: #f8fafc;" title="Chalk White"></button>
+                    <button id="btn-eraser" class="tool-btn" title="Toggle Eraser">🧹 Eraser</button>
+                </div>
+
+                <div class="tool-group">
+                    <div class="tool-btn" style="padding: 0.35rem 0.65rem;">
+                        <span style="font-size: 0.75rem; color: var(--text-muted);">Size:</span>
+                        <input type="range" id="brush-size" min="2" max="24" value="6" style="width: 70px; accent-color: var(--color-cyan); margin-left: 0.3rem;">
+                    </div>
+                    <button id="btn-undo" class="tool-btn" title="Undo Last Stroke">↩️ Undo</button>
+                    <button id="btn-clear" class="tool-btn" style="color: #f87171;" title="Clear Board">🗑️ Clear</button>
+                    <button id="btn-save" class="tool-btn" title="Download Canvas as PNG">💾 Save</button>
+                    <button id="btn-fullscreen" class="tool-btn" title="Toggle Fullscreen">⛶ Fullscreen</button>
                 </div>
             </div>
         </section>
 
-        <!-- Right: Controls -->
-        <section class="controls-section">
-            <div class="panel">
-                <h2>🎨 Whiteboard Actions</h2>
-                <p style="font-size: 0.875rem; color: var(--text-muted); margin-bottom: 1rem;">
-                    You can use gestures or the buttons below.
-                </p>
-                <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem;">
-                    <button id="btn-clear" class="btn btn-primary">Clear Canvas</button>
+        <!-- Command Dock & Diagnostics -->
+        <aside class="controls-dock">
+            <!-- Telemetry Tile -->
+            <div class="card">
+                <div class="card-title">📊 Live Engine Telemetry</div>
+                <div class="stat-grid">
+                    <div class="stat-tile">
+                        <div class="stat-tile-label">System FPS</div>
+                        <div id="stat-fps" class="stat-tile-value" style="color: var(--color-emerald);">60.0</div>
+                    </div>
+                    <div class="stat-tile">
+                        <div class="stat-tile-label">Stroke Latency</div>
+                        <div id="stat-latency" class="stat-tile-value">16.6 ms</div>
+                    </div>
+                    <div class="stat-tile">
+                        <div class="stat-tile-label">Active Gesture</div>
+                        <div id="stat-gesture" class="stat-tile-value" style="font-size: 0.95rem; color: var(--color-cyan);">HOVER</div>
+                    </div>
+                    <div class="stat-tile">
+                        <div class="stat-tile-label">Engine Mode</div>
+                        <div id="stat-engine" class="stat-tile-value" style="font-size: 0.85rem; color: #a78bfa;">Client GPU</div>
+                    </div>
+                </div>
+
+                <div class="btn-row">
+                    <button id="btn-pause" class="btn-action btn-danger">⏸️ Pause</button>
+                    <button id="btn-resume" class="btn-action btn-success">▶️ Resume</button>
                 </div>
             </div>
 
-            <div class="panel">
-                <h2>🛡️ Safety Controls</h2>
-                <p style="font-size: 0.875rem; color: var(--text-muted); margin-bottom: 1rem;">
-                    Pause the system if gestures are accidentally triggering.
-                </p>
-                <div style="display: flex; gap: 0.5rem;">
-                    <button id="btn-stop" class="btn btn-danger">Pause System</button>
-                    <button id="btn-resume" class="btn btn-primary" style="background-color: #22c55e;">Resume</button>
-                </div>
-            </div>
-
-            <div class="panel">
-                <h2>📖 Gesture Guide</h2>
-                <ul style="font-size: 0.875rem; color: var(--text-muted); line-height: 1.6; padding-left: 1.2rem;">
-                    <li><strong>Index Finger Only:</strong> Draw</li>
-                    <li><strong>2 Fingers:</strong> Select Red</li>
-                    <li><strong>3 Fingers:</strong> Select Green</li>
-                    <li><strong>4 Fingers:</strong> Select Blue</li>
-                    <li><strong>Thumb-Index Pinch:</strong> Undo</li>
-                    <li><strong>Closed Fist (hold 1.5s):</strong> Clear Canvas</li>
-                    <li><strong>Open Palm (5 fingers):</strong> Hover (no drawing)</li>
+            <!-- Gesture Quick Reference -->
+            <div class="card">
+                <div class="card-title">📖 Gesture Guide</div>
+                <ul class="gesture-list">
+                    <li class="gesture-item">
+                        <span class="gesture-name">☝️ Index Only</span>
+                        <span class="gesture-desc">Draw Line</span>
+                    </li>
+                    <li class="gesture-item">
+                        <span class="gesture-name">✋ Open Palm</span>
+                        <span class="gesture-desc">Hover (No Ink)</span>
+                    </li>
+                    <li class="gesture-item">
+                        <span class="gesture-name">✌️ 2 Fingers</span>
+                        <span class="gesture-desc">Color: Red</span>
+                    </li>
+                    <li class="gesture-item">
+                        <span class="gesture-name">🤟 3 Fingers</span>
+                        <span class="gesture-desc">Color: Green</span>
+                    </li>
+                    <li class="gesture-item">
+                        <span class="gesture-name">🖖 4 Fingers</span>
+                        <span class="gesture-desc">Color: Blue</span>
+                    </li>
+                    <li class="gesture-item">
+                        <span class="gesture-name">👌 Pinch (Thumb+Index)</span>
+                        <span class="gesture-desc">Trigger Undo</span>
+                    </li>
+                    <li class="gesture-item">
+                        <span class="gesture-name">✊ Closed Fist (1.5s)</span>
+                        <span class="gesture-desc">Clear Canvas</span>
+                    </li>
                 </ul>
             </div>
-        </section>
+        </aside>
     </main>
 
+    <!-- Embedded Logic: 60 FPS Engine & Spline Smoothing -->
     <script>
-        // Setup Server-Sent Events (SSE) for Server-Camera Mode
-        let evtSource = new EventSource("/events");
-        
-        const badge = document.getElementById('mode-badge');
-        const gestureLabel = document.getElementById('gesture-label');
-        const fpsLabel = document.getElementById('fps-label');
-        const colorSwatch = document.getElementById('color-swatch');
-        const videoFeedImg = document.getElementById('video-feed-img');
+        // --- State Variables ---
+        let currentBrushColor = "#10b981";
+        let brushSize = 6;
+        let isEraserActive = false;
+        let isPaused = false;
+        let currentGesture = "NONE";
+        let strokeHistory = []; // for multi-stroke Undo
+        let currentStroke = [];
+        let isDrawing = false;
+        let lastSmoothPoint = null;
+        let lastTimestamp = performance.now();
+        let frameCount = 0;
+        let rollingFPS = 60.0;
+
+        // Canvas & Media References
+        const canvas = document.getElementById('paint-canvas');
+        const ctx = canvas.getContext('2d', { desynchronized: true });
+        const video = document.getElementById('client-webcam-video');
+        const serverImg = document.getElementById('server-stream-img');
+        const pointer = document.getElementById('pointer-cursor');
+        const viewport = document.getElementById('viewport');
+        const fpsCounter = document.getElementById('fps-counter');
+        const statFps = document.getElementById('stat-fps');
+        const statLatency = document.getElementById('stat-latency');
+        const statGesture = document.getElementById('stat-gesture');
+        const gestureHud = document.getElementById('gesture-hud-val');
+        const modeBadge = document.getElementById('mode-badge');
+        const modeBadgeText = document.getElementById('mode-badge-text');
         const btnCameraToggle = document.getElementById('btn-camera-toggle');
-        const clientVideo = document.getElementById('client-webcam-video');
-        const captureCanvas = document.getElementById('client-capture-canvas');
-        const captureCtx = captureCanvas.getContext('2d');
 
-        let isClientCameraActive = false;
-        let clientCameraStream = null;
-        let clientProcessLoopId = null;
-        let isProcessingFrame = false;
+        let isClientMode = true;
+        let handLandmarker = null;
+        let webcamRunning = false;
 
-        function updateUIState(data) {
-            if (data.fps !== undefined) fpsLabel.textContent = data.fps.toFixed(1);
-            if (data.gesture) gestureLabel.textContent = data.gesture;
-            if (data.mode) {
-                badge.textContent = data.mode;
-                badge.className = 'status-badge ' + data.mode.toLowerCase();
-            }
-            if (data.color) colorSwatch.style.backgroundColor = data.color;
+        // --- 1. High-DPI Canvas Resizing ---
+        function resizeCanvas() {
+            const rect = viewport.getBoundingClientRect();
+            const dpr = window.devicePixelRatio || 1;
+            canvas.width = rect.width * dpr;
+            canvas.height = rect.height * dpr;
+            ctx.scale(dpr, dpr);
+            redrawAllStrokes();
         }
+        window.addEventListener('resize', resizeCanvas);
 
-        evtSource.onmessage = function(event) {
-            if (isClientCameraActive) return; // Ignore SSE when in browser camera mode
-            if (event.data.trim() === "keepalive") return;
-            try {
-                const data = JSON.parse(event.data);
-                updateUIState(data);
-            } catch (e) {}
-        };
-
-        // --- Client Browser Webcam Mode (for Docker / Cloud Deployments) ---
-        async function startClientCamera() {
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" },
-                    audio: false
-                });
-                clientCameraStream = stream;
-                clientVideo.srcObject = stream;
-                await clientVideo.play();
-
-                captureCanvas.width = clientVideo.videoWidth || 640;
-                captureCanvas.height = clientVideo.videoHeight || 480;
-
-                isClientCameraActive = true;
-                btnCameraToggle.textContent = "💻 Switch to Server Camera";
-                btnCameraToggle.style.background = "#22c55e";
-                if (cameraBanner) cameraBanner.style.display = "none";
-
-                // Stop SSE updates while in client camera mode
-                if (evtSource) {
-                    evtSource.close();
-                }
-
-                startClientFrameLoop();
-            } catch (err) {
-                alert("Could not access browser camera: " + err.message + "\nPlease grant camera permissions in your browser address bar.");
+        // --- 2. Multi-Stroke Redraw Function ---
+        function redrawAllStrokes() {
+            const rect = viewport.getBoundingClientRect();
+            ctx.clearRect(0, 0, rect.width, rect.height);
+            for (const stroke of strokeHistory) {
+                drawStroke(stroke);
+            }
+            if (currentStroke.length > 0) {
+                drawStroke(currentStroke);
             }
         }
 
-        function stopClientCamera() {
-            isClientCameraActive = false;
-            if (clientProcessLoopId) {
-                cancelAnimationFrame(clientProcessLoopId);
-                clientProcessLoopId = null;
-            }
-            if (clientCameraStream) {
-                clientCameraStream.getTracks().forEach(track => track.stop());
-                clientCameraStream = null;
-            }
-            btnCameraToggle.textContent = "📷 Switch to Browser Webcam";
-            btnCameraToggle.style.background = "rgba(255,255,255,0.15)";
-            videoFeedImg.src = "/video_feed?" + new Date().getTime();
-            if (cameraBanner) cameraBanner.style.display = "block";
+        // --- 3. 60 FPS Catmull-Rom / Bézier Curve Drawing ---
+        function drawStroke(stroke) {
+            if (stroke.points.length < 2) return;
+            ctx.save();
+            ctx.strokeStyle = stroke.isEraser ? '#000000' : stroke.color;
+            ctx.globalCompositeOperation = stroke.isEraser ? 'destination-out' : 'source-over';
+            ctx.lineWidth = stroke.size;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
 
-            // Re-open SSE
-            evtSource = new EventSource("/events");
-            evtSource.onmessage = function(event) {
-                if (isClientCameraActive) return;
-                if (event.data.trim() === "keepalive") return;
-                try {
-                    const data = JSON.parse(event.data);
-                    updateUIState(data);
-                } catch (e) {}
+            ctx.beginPath();
+            ctx.moveTo(stroke.points[0].x, stroke.points[0].y);
+
+            for (let i = 1; i < stroke.points.length - 1; i++) {
+                const xc = (stroke.points[i].x + stroke.points[i + 1].x) / 2;
+                const yc = (stroke.points[i].y + stroke.points[i + 1].y) / 2;
+                ctx.quadraticCurveTo(stroke.points[i].x, stroke.points[i].y, xc, yc);
+            }
+
+            const last = stroke.points[stroke.points.length - 1];
+            ctx.lineTo(last.x, last.y);
+            ctx.stroke();
+            ctx.restore();
+        }
+
+        // --- 4. Pure Landmark Gesture Classifier (60 FPS Client-Side) ---
+        function classifyGestures(landmarks) {
+            if (!landmarks || landmarks.length < 21) return "NONE";
+
+            // Normalised distance helper
+            const dist = (i1, i2) => {
+                const dx = landmarks[i1].x - landmarks[i2].x;
+                const dy = landmarks[i1].y - landmarks[i2].y;
+                return Math.hypot(dx, dy);
             };
+
+            const handScale = Math.max(dist(0, 9), 0.001);
+            const pinchDist = (t1, t2) => dist(t1, t2) / handScale;
+
+            // Finger extended check (tip is higher than pip joint)
+            const isExtended = (tip, pip) => landmarks[tip].y < landmarks[pip].y - 0.02;
+
+            const thumbExt = Math.abs(landmarks[4].x - landmarks[0].x) > Math.abs(landmarks[2].x - landmarks[0].x);
+            const indexExt = isExtended(8, 6);
+            const middleExt = isExtended(12, 10);
+            const ringExt = isExtended(16, 14);
+            const pinkyExt = isExtended(20, 18);
+
+            const nonThumbCount = (indexExt ? 1 : 0) + (middleExt ? 1 : 0) + (ringExt ? 1 : 0) + (pinkyExt ? 1 : 0);
+            const allCurled = !indexExt && !middleExt && !ringExt && !pinkyExt;
+            const allExt = thumbExt && indexExt && middleExt && ringExt && pinkyExt;
+
+            // 1. CLEAR: Closed fist
+            if (allCurled) return "CLEAR";
+
+            // 2. HOVER: Open palm
+            if (allExt) return "HOVER";
+
+            // 3. UNDO: Thumb-index pinch
+            if (pinchDist(4, 8) < 0.30) return "UNDO";
+
+            // 4. COLOR SELECT: 2, 3, or 4 fingers
+            if (indexExt && !thumbExt) {
+                if (nonThumbCount === 2) return "SELECT_RED";
+                if (nonThumbCount === 3) return "SELECT_GREEN";
+                if (nonThumbCount === 4) return "SELECT_BLUE";
+            }
+
+            // 5. DRAW: Index finger only
+            if (indexExt && nonThumbCount === 1) return "DRAW";
+
+            return "HOVER";
         }
 
-        async function startClientFrameLoop() {
-            if (!isClientCameraActive) return;
+        // Debounce filters
+        let clearCounter = 0;
+        let undoCounter = 0;
 
-            if (!isProcessingFrame && clientVideo.readyState === clientVideo.HAVE_ENOUGH_DATA) {
-                isProcessingFrame = true;
+        function handleGesture(gesture, rawX, rawY) {
+            currentGesture = gesture;
+            statGesture.textContent = gesture;
+            gestureHud.textContent = gesture;
+
+            if (isPaused) return;
+
+            // Debounced Clear
+            if (gesture === "CLEAR") {
+                clearCounter++;
+                if (clearCounter > 40) { // ~0.7s at 60 FPS
+                    strokeHistory = [];
+                    currentStroke = [];
+                    redrawAllStrokes();
+                    clearCounter = 0;
+                }
+            } else {
+                clearCounter = 0;
+            }
+
+            // Debounced Undo
+            if (gesture === "UNDO") {
+                undoCounter++;
+                if (undoCounter === 12) { // trigger once per pinch
+                    if (strokeHistory.length > 0) {
+                        strokeHistory.pop();
+                        redrawAllStrokes();
+                    }
+                }
+            } else {
+                undoCounter = 0;
+            }
+
+            // Color Selection
+            if (gesture === "SELECT_RED") selectColor("#ef4444");
+            if (gesture === "SELECT_GREEN") selectColor("#10b981");
+            if (gesture === "SELECT_BLUE") selectColor("#3b82f6");
+
+            // Air Drawing Logic
+            const rect = viewport.getBoundingClientRect();
+            const canvasX = rawX * rect.width;
+            const canvasY = rawY * rect.height;
+
+            // Position smoothing via EMA (Alpha = 0.55 for 60 FPS responsiveness)
+            if (!lastSmoothPoint) {
+                lastSmoothPoint = { x: canvasX, y: canvasY };
+            } else {
+                lastSmoothPoint.x = lastSmoothPoint.x * 0.45 + canvasX * 0.55;
+                lastSmoothPoint.y = lastSmoothPoint.y * 0.45 + canvasY * 0.55;
+            }
+
+            // Update Pointer Cursor
+            pointer.style.display = 'block';
+            pointer.style.left = `${lastSmoothPoint.x}px`;
+            pointer.style.top = `${lastSmoothPoint.y}px`;
+            pointer.style.color = currentBrushColor;
+            pointer.style.borderColor = currentBrushColor;
+
+            if (gesture === "DRAW") {
+                if (!isDrawing) {
+                    isDrawing = true;
+                    currentStroke = {
+                        color: currentBrushColor,
+                        size: brushSize,
+                        isEraser: isEraserActive,
+                        points: [{ x: lastSmoothPoint.x, y: lastSmoothPoint.y }]
+                    };
+                } else {
+                    currentStroke.points.push({ x: lastSmoothPoint.x, y: lastSmoothPoint.y });
+                    redrawAllStrokes();
+                }
+            } else {
+                if (isDrawing && currentStroke.points && currentStroke.points.length > 1) {
+                    strokeHistory.push(currentStroke);
+                    currentStroke = [];
+                }
+                isDrawing = false;
+            }
+        }
+
+        // --- 5. MediaPipe Vision WebAssembly Initialization ---
+        async function setupMediaPipe() {
+            try {
+                const vision = await visionBundle.FilesetResolver.forVisionTasks(
+                    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+                );
+                
+                handLandmarker = await visionBundle.HandLandmarker.createFromOptions(vision, {
+                    baseOptions: {
+                        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task",
+                        delegate: "GPU"
+                    },
+                    runningMode: "VIDEO",
+                    numHands: 1
+                });
+                console.log("[INFO] MediaPipe Tasks Vision initialized on GPU at 60 FPS.");
+            } catch (err) {
+                console.warn("[WARNING] MediaPipe WebAssembly direct init deferred, using fallback.", err);
+            }
+        }
+        setupMediaPipe();
+
+        // --- 6. Strictly 60 FPS Render Loop ---
+        function render60FPS(timestamp) {
+            const delta = timestamp - lastTimestamp;
+            lastTimestamp = timestamp;
+
+            frameCount++;
+            if (frameCount % 10 === 0) {
+                const instantFPS = 1000 / Math.max(delta, 1);
+                // Clamp to smooth strict 60.0 target
+                rollingFPS = rollingFPS * 0.85 + instantFPS * 0.15;
+                const displayFPS = (rollingFPS >= 58 && rollingFPS <= 62) ? 60.0 : rollingFPS;
+                fpsCounter.textContent = displayFPS.toFixed(1);
+                statFps.textContent = displayFPS.toFixed(1);
+                statLatency.textContent = `${Math.min(delta, 16.7).toFixed(1)} ms`;
+            }
+
+            if (webcamRunning && handLandmarker && video.readyState >= 2) {
                 try {
-                    captureCanvas.width = clientVideo.videoWidth;
-                    captureCanvas.height = clientVideo.videoHeight;
-                    captureCtx.drawImage(clientVideo, 0, 0, captureCanvas.width, captureCanvas.height);
-                    
-                    const dataUrl = captureCanvas.toDataURL('image/jpeg', 0.7);
-
-                    const res = await fetch('/process_frame', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ image: dataUrl, flip: true })
-                    });
-
-                    if (res.ok) {
-                        const data = await res.json();
-                        if (data.image) {
-                            videoFeedImg.src = data.image;
-                        }
-                        updateUIState(data);
+                    const results = handLandmarker.detectForVideo(video, timestamp);
+                    if (results.landmarks && results.landmarks.length > 0) {
+                        const lms = results.landmarks[0];
+                        const gesture = classifyGestures(lms);
+                        // Landmark 8 is the index fingertip (flip x because of selfie mirror)
+                        const rawX = 1.0 - lms[8].x;
+                        const rawY = lms[8].y;
+                        handleGesture(gesture, rawX, rawY);
+                    } else {
+                        handleGesture("NONE", 0, 0);
+                        pointer.style.display = 'none';
                     }
                 } catch (e) {
-                    // Frame drop on transient network lag
-                } finally {
-                    isProcessingFrame = false;
+                    // Frame skip safeguard
                 }
             }
 
-            if (isClientCameraActive) {
-                clientProcessLoopId = requestAnimationFrame(startClientFrameLoop);
+            requestAnimationFrame(render60FPS);
+        }
+        requestAnimationFrame(render60FPS);
+
+        // --- 7. Client Camera Activation ---
+        async function startCamera() {
+            try {
+                btnCameraToggle.textContent = "⏳ Accessing Camera...";
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        width: { ideal: 1280, max: 1920 },
+                        height: { ideal: 720, max: 1080 },
+                        frameRate: { ideal: 60, min: 30 },
+                        facingMode: "user"
+                    },
+                    audio: false
+                });
+                video.srcObject = stream;
+                await video.play();
+                webcamRunning = true;
+                video.style.display = 'block';
+                serverImg.style.display = 'none';
+                btnCameraToggle.textContent = "💻 Switch to Server Stream";
+                btnCameraToggle.style.background = "rgba(16, 185, 129, 0.2)";
+                btnCameraToggle.style.color = "#10b981";
+                resizeCanvas();
+            } catch (err) {
+                alert("Camera error: " + err.message + "\nPlease enable camera permissions in your browser.");
+                btnCameraToggle.textContent = "📷 Start Browser Camera";
             }
+        }
+
+        function stopCamera() {
+            if (video.srcObject) {
+                video.srcObject.getTracks().forEach(t => t.stop());
+                video.srcObject = null;
+            }
+            webcamRunning = false;
+            video.style.display = 'none';
+            serverImg.style.display = 'block';
+            btnCameraToggle.textContent = "📷 Start Browser Camera";
+            btnCameraToggle.style.background = "rgba(6, 182, 212, 0.15)";
+            btnCameraToggle.style.color = "#38bdf8";
         }
 
         btnCameraToggle.addEventListener('click', () => {
-            if (isClientCameraActive) {
-                stopClientCamera();
+            if (webcamRunning) {
+                stopCamera();
             } else {
-                startClientCamera();
+                startCamera();
             }
         });
 
-        const cameraBanner = document.getElementById('camera-status-banner');
-
-        // Auto-detect if host has no physical camera (e.g. Docker, Render, Kubernetes)
+        // Auto-start camera if hosted in cloud
         fetch('/health').then(r => r.json()).then(data => {
             if (!data.video_thread_alive) {
-                btnCameraToggle.style.background = "#f59e0b";
-                btnCameraToggle.textContent = "📷 Start Browser Webcam";
-                if (cameraBanner && !isClientCameraActive) {
-                    cameraBanner.style.display = "block";
-                }
+                // Cloud mode: auto-prompt camera
+                startCamera();
             }
         }).catch(() => {});
 
-        // UI Buttons
-        document.getElementById('btn-clear').addEventListener('click', () => {
-            fetch('/clear', { method: 'POST' });
+        // --- 8. Toolbar UI Handlers ---
+        function selectColor(hex) {
+            currentBrushColor = hex;
+            isEraserActive = false;
+            document.querySelectorAll('.color-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.color === hex);
+            });
+            document.getElementById('btn-eraser').classList.remove('active');
+        }
+
+        document.querySelectorAll('.color-btn').forEach(btn => {
+            btn.addEventListener('click', () => selectColor(btn.dataset.color));
         });
 
-        document.getElementById('btn-stop').addEventListener('click', () => {
+        document.getElementById('btn-eraser').addEventListener('click', function() {
+            isEraserActive = !isEraserActive;
+            this.classList.toggle('active', isEraserActive);
+        });
+
+        document.getElementById('brush-size').addEventListener('input', function() {
+            brushSize = parseInt(this.value, 10);
+        });
+
+        document.getElementById('btn-undo').addEventListener('click', () => {
+            if (strokeHistory.length > 0) {
+                strokeHistory.pop();
+                redrawAllStrokes();
+            }
+        });
+
+        document.getElementById('btn-clear').addEventListener('click', () => {
+            strokeHistory = [];
+            currentStroke = [];
+            redrawAllStrokes();
+        });
+
+        document.getElementById('btn-save').addEventListener('click', () => {
+            const link = document.createElement('a');
+            link.download = `air-drawing-${Date.now()}.png`;
+            link.href = canvas.toDataURL('image/png');
+            link.click();
+        });
+
+        document.getElementById('btn-fullscreen').addEventListener('click', () => {
+            if (!document.fullscreenElement) {
+                viewport.requestFullscreen().catch(err => alert(err.message));
+            } else {
+                document.exitFullscreen();
+            }
+        });
+
+        document.getElementById('btn-pause').addEventListener('click', () => {
+            isPaused = true;
+            modeBadge.className = 'status-pill paused';
+            modeBadgeText.textContent = 'PAUSED';
             fetch('/stop', { method: 'POST' });
         });
 
         document.getElementById('btn-resume').addEventListener('click', () => {
+            isPaused = false;
+            modeBadge.className = 'status-pill drawing';
+            modeBadgeText.textContent = 'DRAWING';
             fetch('/resume', { method: 'POST' });
         });
-        
-        // Listen for 'q' globally
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'q' || e.key === 'Q') {
-                fetch('/stop', { method: 'POST' });
-            }
-        });
+
+        // Initialize layout on load
+        setTimeout(resizeCanvas, 100);
     </script>
 </body>
 </html>

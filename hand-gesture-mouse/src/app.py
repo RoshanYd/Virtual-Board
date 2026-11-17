@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import cv2
 import numpy as np
-from flask import Flask, render_template, Response, jsonify, request
+from flask import Flask, render_template, Response, jsonify, request, send_from_directory
 
 from src.hand_tracker import HandTracker
 from src.gesture_classifier import classify_whiteboard_gesture
@@ -82,7 +82,10 @@ def video_loop() -> None:
     for attempt in range(3):
         cap = cv2.VideoCapture(0)
         if cap.isOpened():
-            print(f"[INFO] Camera opened on attempt {attempt + 1}.")
+            cap.set(cv2.CAP_PROP_FPS, 60)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            print(f"[INFO] Camera opened on attempt {attempt + 1} at 60 FPS target.")
             break
         print(f"[WARNING] Camera open attempt {attempt + 1}/3 failed, retrying...")
         time.sleep(0.5)
@@ -225,7 +228,7 @@ def generate_frames() -> Iterator[bytes]:
             b'--frame\r\n'
             b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n'
         )
-        time.sleep(0.033)  # ~30 fps cap
+        time.sleep(0.016)  # ~60 fps target
 
 
 def generate_sse() -> Iterator[str]:
@@ -245,6 +248,13 @@ def generate_sse() -> Iterator[str]:
 @app.route('/')
 def index():
     return render_template('index.html')
+
+
+@app.route('/models/<path:filename>')
+def serve_model(filename):
+    """Serve MediaPipe task models directly to web clients for WebAssembly inference."""
+    model_dir = Path(__file__).resolve().parent.parent / "models"
+    return send_from_directory(model_dir, filename)
 
 
 @app.route('/video_feed')
