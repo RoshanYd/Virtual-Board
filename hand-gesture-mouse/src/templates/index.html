@@ -14,11 +14,15 @@
     <header class="navbar">
         <a href="#" class="brand">
             <div class="brand-icon">✨</div>
-            <span class="brand-title">Air-Drawing Whiteboard</span>
+            <span class="brand-title">
+                <span class="brand-full">Air-Drawing Whiteboard</span>
+                <span class="brand-short">AirBoard</span>
+            </span>
         </a>
         <div class="nav-actions">
-            <button id="btn-camera-toggle" class="tool-btn" style="background: rgba(6, 182, 212, 0.15); border-color: rgba(6, 182, 212, 0.3); color: #38bdf8;">
-                📷 Start Browser Camera
+            <button id="btn-camera-toggle" class="tool-btn nav-cam-btn">
+                <span id="cam-icon">📷</span>
+                <span id="cam-text">Start Camera</span>
             </button>
             <div id="mode-badge" class="status-pill drawing">
                 <span class="pulse-dot"></span>
@@ -71,13 +75,13 @@
                 </div>
 
                 <div class="tool-group">
-                    <div class="tool-btn" style="padding: 0.35rem 0.65rem;">
-                        <span style="font-size: 0.75rem; color: var(--text-muted);">Size:</span>
-                        <input type="range" id="brush-size" min="2" max="24" value="6" style="width: 70px; accent-color: var(--color-cyan); margin-left: 0.3rem;">
+                    <div class="tool-btn size-slider-tool">
+                        <span class="slider-label">Size:</span>
+                        <input type="range" id="brush-size" min="2" max="24" value="6">
                     </div>
                     <button id="btn-toggle-mesh" class="tool-btn active" title="Toggle Hand Skeleton Markings">🦴 Markings</button>
                     <button id="btn-undo" class="tool-btn" title="Undo Last Stroke">↩️ Undo</button>
-                    <button id="btn-clear" class="tool-btn" style="color: #f87171;" title="Clear Board">🗑️ Clear</button>
+                    <button id="btn-clear" class="tool-btn clear-btn" title="Clear Board">🗑️ Clear</button>
                     <button id="btn-save" class="tool-btn" title="Download Canvas as PNG">💾 Save</button>
                     <button id="btn-fullscreen" class="tool-btn" title="Toggle Fullscreen">⛶ Fullscreen</button>
                 </div>
@@ -219,8 +223,33 @@
             skeletonCanvas.width  = vpW * dpr;
             skeletonCanvas.height = vpH * dpr;
             skelCtx.scale(dpr, dpr);
+
+            setCameraBtnState(webcamRunning ? "webcam_active" : "server_active");
         }
         window.addEventListener('resize', resizeCanvas);
+
+        function setCameraBtnState(mode) {
+            const isMobile = window.innerWidth < 640;
+            const camText = document.getElementById('cam-text');
+            const camIcon = document.getElementById('cam-icon');
+
+            if (mode === "loading") {
+                if (camIcon) camIcon.textContent = "⏳";
+                if (camText) camText.textContent = isMobile ? "Starting…" : "Accessing camera…";
+            } else if (mode === "webcam_active") {
+                if (camIcon) camIcon.textContent = "💻";
+                if (camText) camText.textContent = isMobile ? "Server Stream" : "Switch to Server Stream";
+                btnCameraToggle.style.background = "rgba(16,185,129,0.2)";
+                btnCameraToggle.style.borderColor = "rgba(16,185,129,0.4)";
+                btnCameraToggle.style.color = "#10b981";
+            } else {
+                if (camIcon) camIcon.textContent = "📷";
+                if (camText) camText.textContent = isMobile ? "Camera" : "Start Browser Camera";
+                btnCameraToggle.style.background = "rgba(6,182,212,0.15)";
+                btnCameraToggle.style.borderColor = "rgba(6,182,212,0.3)";
+                btnCameraToggle.style.color = "#38bdf8";
+            }
+        }
 
         // Video to Canvas Coordinate Mapping (selfie mirror & aspect ratio aware)
         function getCanvasCoords(rawX, rawY) {
@@ -606,9 +635,15 @@
         // ============================================================
         async function startCamera() {
             try {
-                btnCameraToggle.textContent = "⏳ Accessing camera…";
+                setCameraBtnState("loading");
+                const isMobile = window.innerWidth < 768;
                 const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { width:{ideal:1280}, height:{ideal:720}, frameRate:{ideal:60,min:30}, facingMode:"user" },
+                    video: {
+                        width:  { ideal: isMobile ? 640 : 1280 },
+                        height: { ideal: isMobile ? 480 : 720 },
+                        frameRate: { ideal: 60, min: 30 },
+                        facingMode: "user"
+                    },
                     audio: false
                 });
                 video.srcObject = stream;
@@ -616,13 +651,11 @@
                 webcamRunning  = true;
                 video.style.display    = 'block';
                 serverImg.style.display= 'none';
-                btnCameraToggle.textContent          = "💻 Switch to Server Stream";
-                btnCameraToggle.style.background     = "rgba(16,185,129,0.2)";
-                btnCameraToggle.style.color          = "#10b981";
+                setCameraBtnState("webcam_active");
                 resizeCanvas();
             } catch (err) {
                 alert("Camera error: " + err.message);
-                btnCameraToggle.textContent = "📷 Start Browser Camera";
+                setCameraBtnState("server_active");
             }
         }
 
@@ -633,13 +666,44 @@
             webcamRunning          = false;
             video.style.display    = 'none';
             serverImg.style.display= 'block';
-            btnCameraToggle.textContent          = "📷 Start Browser Camera";
-            btnCameraToggle.style.background     = "rgba(6,182,212,0.15)";
-            btnCameraToggle.style.color          = "#38bdf8";
+            setCameraBtnState("server_active");
         }
 
         btnCameraToggle.addEventListener('click', () =>
             webcamRunning ? stopCamera() : startCamera());
+
+        // Direct Touch Drawing for Mobile & Tablets (complements Air-Gestures)
+        canvas.addEventListener('touchstart', (e) => {
+            if (e.touches.length === 1) {
+                const touch = e.touches[0];
+                const rect = viewport.getBoundingClientRect();
+                const x = touch.clientX - rect.left;
+                const y = touch.clientY - rect.top;
+                isDrawing = true;
+                activeStroke = {
+                    color: currentBrushColor,
+                    size: brushSize,
+                    eraser: isEraserActive,
+                    points: [{ x, y }]
+                };
+            }
+        }, { passive: true });
+
+        canvas.addEventListener('touchmove', (e) => {
+            if (!isDrawing || !activeStroke || e.touches.length !== 1) return;
+            const touch = e.touches[0];
+            const rect = viewport.getBoundingClientRect();
+            const x = touch.clientX - rect.left;
+            const y = touch.clientY - rect.top;
+            const pts = activeStroke.points;
+            const prev = pts[pts.length - 1];
+            pts.push({ x, y });
+            drawSegment(prev.x, prev.y, x, y, activeStroke.color, activeStroke.size, activeStroke.eraser);
+        }, { passive: true });
+
+        canvas.addEventListener('touchend', () => {
+            finishStroke();
+        }, { passive: true });
 
         // Auto-start in cloud (no server camera)
         fetch('/health').then(r => r.json()).then(d => {
