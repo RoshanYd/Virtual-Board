@@ -7,10 +7,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PORT=5000 \
     HOST=0.0.0.0
 
-# Install required system packages for OpenCV, MediaPipe, and health checks
+# Install required system packages for OpenCV, MediaPipe, OpenGL/EGL, and health checks
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
+    libegl1 \
+    libgles2 \
+    libgomp1 \
     curl \
     && rm -rf /var/lib/apt/lists/*
 

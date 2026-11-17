@@ -31,6 +31,11 @@
     </header>
 
     <main class="main-container">
+        <!-- Optional Cloud Banner -->
+        <div id="camera-status-banner" style="display: none; grid-column: 1 / -1; background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.4); border-radius: 10px; padding: 0.75rem 1rem; color: #fbbf24; font-size: 0.9rem; text-align: center;">
+            ☁️ <strong>Cloud Deployment Detected:</strong> Click the button above to grant browser camera access and start drawing in the air!
+        </div>
+
         <!-- Left: Video Feed -->
         <section class="video-section">
             <img id="video-feed-img" src="{{ url_for('video_feed') }}" class="video-feed" alt="Webcam Feed">
@@ -148,6 +153,7 @@
                 isClientCameraActive = true;
                 btnCameraToggle.textContent = "💻 Switch to Server Camera";
                 btnCameraToggle.style.background = "#22c55e";
+                if (cameraBanner) cameraBanner.style.display = "none";
 
                 // Stop SSE updates while in client camera mode
                 if (evtSource) {
@@ -156,7 +162,7 @@
 
                 startClientFrameLoop();
             } catch (err) {
-                alert("Could not access browser camera: " + err.message + "\nPlease grant camera permissions in your browser.");
+                alert("Could not access browser camera: " + err.message + "\nPlease grant camera permissions in your browser address bar.");
             }
         }
 
@@ -173,6 +179,7 @@
             btnCameraToggle.textContent = "📷 Switch to Browser Webcam";
             btnCameraToggle.style.background = "rgba(255,255,255,0.15)";
             videoFeedImg.src = "/video_feed?" + new Date().getTime();
+            if (cameraBanner) cameraBanner.style.display = "block";
 
             // Re-open SSE
             evtSource = new EventSource("/events");
@@ -231,11 +238,16 @@
             }
         });
 
+        const cameraBanner = document.getElementById('camera-status-banner');
+
         // Auto-detect if host has no physical camera (e.g. Docker, Render, Kubernetes)
         fetch('/health').then(r => r.json()).then(data => {
             if (!data.video_thread_alive) {
                 btnCameraToggle.style.background = "#f59e0b";
-                btnCameraToggle.textContent = "📷 Click to Start Browser Webcam";
+                btnCameraToggle.textContent = "📷 Start Browser Webcam";
+                if (cameraBanner && !isClientCameraActive) {
+                    cameraBanner.style.display = "block";
+                }
             }
         }).catch(() => {});
 

@@ -54,13 +54,15 @@ current_frame: bytes | None = None
 
 # Global state flags
 kill_switch_active = False
-video_thread_alive = True
+video_thread_alive = False
 system_paused = False
 
-# Placeholder frame shown before the camera starts
+# Placeholder frame shown before the camera starts or when running in Cloud/Docker mode
 _PLACEHOLDER = np.zeros((480, 640, 3), dtype=np.uint8)
-cv2.putText(_PLACEHOLDER, "Starting camera...", (140, 240),
-            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 2)
+cv2.putText(_PLACEHOLDER, "Virtual Board Cloud Mode", (130, 200),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+cv2.putText(_PLACEHOLDER, "Click 'Start Browser Webcam' above to draw!", (80, 250),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 120), 1)
 _, _buf = cv2.imencode('.jpg', _PLACEHOLDER)
 current_frame = _buf.tobytes()
 
@@ -95,6 +97,9 @@ def video_loop() -> None:
         except Exception as e:
             print(f"[WARNING] Tracker pre-warm failed: {e}")
         return
+
+    video_thread_alive = True
+    print("[INFO] Hardware camera streaming active.")
 
     # --- Initialise tracker ---
     try:
@@ -371,16 +376,24 @@ def health():
     })
 
 
+# Automatically initialize video service on import (compatible with both Gunicorn and direct Python)
+_video_worker_started = False
+def start_background_service():
+    global _video_worker_started
+    if not _video_worker_started:
+        _video_worker_started = True
+        t = threading.Thread(target=video_loop, daemon=True)
+        t.start()
+
+start_background_service()
+
+
 # ---------------------------------------------------------------------------
 # Entry Point
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     host = os.environ.get("HOST", "0.0.0.0")
-
-    print("[INFO] Starting background video worker...")
-    t = threading.Thread(target=video_loop, daemon=True)
-    t.start()
 
     print(f"[INFO] Starting Flask server on http://{host}:{port}")
     app.run(host=host, port=port, debug=False, use_reloader=False)
